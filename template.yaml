@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Self-hosted home-services MCP server
+
+Parameters:
+  OAuthClientId:
+    Type: String
+    Default: ""
+    Description: OAuth client ID; leave empty to disable OAuth.
+  OAuthClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: OAuth client secret.
+  PublicBaseUrl:
+    Type: String
+    Default: ""
+    Description: Canonical public URL used for OAuth metadata.
+  AllowedOrigins:
+    Type: String
+    Default: ""
+    Description: Comma-separated browser origins allowed by the operator.
+  ProvidersApi:
+    Type: String
+    Default: ""
+    Description: Operator-owned provider search endpoint.
+  CoordsResolveApi:
+    Type: String
+    Default: ""
+    Description: Operator-owned coordinate resolver endpoint.
+  ZipResolveApi:
+    Type: String
+    Default: ""
+    Description: Operator-owned postal-code resolver endpoint.
+  GeocodingApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned address geocoding endpoint.
+  GeocodingApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional key for the configured geocoding endpoint.
+  BookingApi:
+    Type: String
+    Default: ""
+    Description: Operator-owned booking creation endpoint.
+  ServiceRequestsUrl:
+    Type: String
+    Default: ""
+    Description: Operator-owned service-request history/status endpoint.
+  ServiceRequestsMetadataUrl:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned endpoint for booking notification metadata.
+  ReviewsApi:
+    Type: String
+    Default: ""
+    Description: Operator-owned provider profile/reviews endpoint.
+  ProfileLookupApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned profile lookup endpoint.
+  AuthWebhookUrl:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned OTP endpoint.
+  HomeownerProfileApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned profile-by-token endpoint.
+  SendBookNotificationApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned booking notification endpoint.
+  SendJobToSlackApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned notification endpoint.
+  MonitorSlackApi:
+    Type: String
+    Default: ""
+    Description: Optional operator-owned monitoring endpoint.
+  UpstreamMcpUrl:
+    Type: String
+    Default: ""
+    Description: Optional operator-controlled upstream MCP relay URL.
+  UpstreamMcpAuthToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional upstream relay bearer token.
+  MvpStaticMcpToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional compatibility bearer token; prefer OAuth in production.
+  OpenAiAppsChallengeToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional app verification challenge token.
+  RequireDurableState:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Require the shared state table for production auth and idempotency.
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 512
+
+Resources:
+  McpFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures:
+        - arm64
+      FunctionUrlConfig:
+        AuthType: NONE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuthStateTable
+      Environment:
+        Variables:
+          AUTH_STATE_TABLE_NAME: !Ref AuthStateTable
+          REQUIRE_DURABLE_STATE: !Ref RequireDurableState
+          PROVIDERS_API: !Ref ProvidersApi
+          COORDS_RESOLVE_API: !Ref CoordsResolveApi
+          ZIP_RESOLVE_API: !Ref ZipResolveApi
+          GEOCODING_API: !Ref GeocodingApi
+          GEOCODING_API_KEY: !Ref GeocodingApiKey
+          BOOKING_API: !Ref BookingApi
+          SERVICE_REQUESTS_URL: !Ref ServiceRequestsUrl
+          SERVICE_REQUESTS_METADATA_URL: !Ref ServiceRequestsMetadataUrl
+          REVIEWS_API: !Ref ReviewsApi
+          PROFILE_LOOKUP_API: !Ref ProfileLookupApi
+          AUTH_WEBHOOK_URL: !Ref AuthWebhookUrl
+          HOMEOWNER_PROFILE_API: !Ref HomeownerProfileApi
+          SEND_BOOK_NOTIFICATION_API: !Ref SendBookNotificationApi
+          SEND_JOB_TO_SLACK_API: !Ref SendJobToSlackApi
+          MCP_MONITOR_SLACK_API: !Ref MonitorSlackApi
+          MCP_MONITOR_ENABLED: "false"
+          UPSTREAM_MCP_URL: !Ref UpstreamMcpUrl
+          UPSTREAM_MCP_AUTH_TOKEN: !Ref UpstreamMcpAuthToken
+          OAUTH_CLIENT_ID: !Ref OAuthClientId
+          OAUTH_CLIENT_SECRET: !Ref OAuthClientSecret
+          PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          ALLOWED_ORIGINS: !Ref AllowedOrigins
+          MVP_STATIC_MCP_TOKEN: !Ref MvpStaticMcpToken
+          OPENAI_APPS_CHALLENGE_TOKEN: !Ref OpenAiAppsChallengeToken
+
+    Metadata:
+      Dockerfile: Dockerfile.lambda
+      DockerContext: .
+      DockerTag: latest
+
+  AuthStateTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: state_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: state_key
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Hire-Nimbus/home-services-mcp",
+  "title": "Home Services MCP Server",
+  "description": "Self-hosted MCP workflows for provider discovery, reviews, profiles, and booking requests.",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/Hire-Nimbus/nimbus-mcp-server",
+    "source": "github"
+  }
+}

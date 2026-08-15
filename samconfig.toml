@@ -1,0 +1,25 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "home-services-mcp"
+resolve_s3 = true
+s3_prefix = "home-services-mcp"
+region = "us-east-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+
+[default.global.parameters]
+region = "us-east-1"
+
+[ci.deploy.parameters]
+stack_name = "home-services-mcp"
+resolve_s3 = true
+s3_prefix = "home-services-mcp"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+disable_rollback = true
+
+[ci.global.parameters]
+region = "us-east-1"
