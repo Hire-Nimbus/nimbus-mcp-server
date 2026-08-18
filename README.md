@@ -149,5 +149,6 @@ Its app handoff uses the operator-configured `APP_LINK` value.
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE). Product names, trademarks,
-hosted services, and operator integrations are not included as defaults by
-this codebase.
+private services, and operator integrations are not included as defaults by
+this codebase. The documented public hosted MCP fallback is an intentional
+exception and does not include credentials or customer data.
