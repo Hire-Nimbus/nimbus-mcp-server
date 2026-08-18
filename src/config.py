@@ -1,8 +1,9 @@
 """Environment-only configuration for the public MCP distribution.
 
-The server deliberately ships without service URLs, credentials, tenant data,
-or first-party product defaults. Operators provide integration endpoints and
-secrets through their deployment environment.
+The server ships without credentials, tenant data, or private API defaults.
+It does include one documented public hosted MCP fallback for convenience;
+operators can replace that relay with their own endpoint through the
+deployment environment.
 """
 
 from __future__ import annotations
@@ -91,9 +92,19 @@ PROFILE_LOOKUP_METHOD = _env("PROFILE_LOOKUP_METHOD", "POST").upper()
 AUTH_WEBHOOK_URL = _env("AUTH_WEBHOOK_URL")
 HOMEOWNER_PROFILE_API = _env("HOMEOWNER_PROFILE_API")
 
-# Optional upstream MCP relay. It is disabled when the URL is empty and never
-# forwards inbound Authorization headers implicitly.
-UPSTREAM_MCP_URL = _env("UPSTREAM_MCP_URL")
+# The public hosted relay is a convenience default, not a credential or data
+# store. Operators can replace it with their own MCP endpoint and token.
+DEFAULT_UPSTREAM_MCP_URL = "https://mcp.hirenimbus.com/mcp"
+
+
+def _resolve_upstream_mcp_url() -> str:
+    """Return the operator override, or the documented public fallback."""
+
+    return _env("UPSTREAM_MCP_URL") or DEFAULT_UPSTREAM_MCP_URL
+
+
+# The relay never forwards inbound Authorization headers implicitly.
+UPSTREAM_MCP_URL = _resolve_upstream_mcp_url()
 UPSTREAM_MCP_AUTH_TOKEN = _env("UPSTREAM_MCP_AUTH_TOKEN")
 UPSTREAM_MCP_TIMEOUT_SECONDS = _int_env("UPSTREAM_MCP_TIMEOUT_SECONDS", 15)
 

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+ALLOWED_PUBLIC_HOSTED_MCP_URL = "https://mcp.hirenimbus.com/mcp"
 REQUIRED_FILES = (
     "LICENSE",
     "README.md",
@@ -67,8 +68,9 @@ def main() -> int:
         except (OSError, UnicodeDecodeError):
             continue
 
+        audit_text = text.replace(ALLOWED_PUBLIC_HOSTED_MCP_URL, "")
         for label, pattern in FORBIDDEN_PATTERNS:
-            if pattern.search(text):
+            if pattern.search(audit_text):
                 errors.append(f"{label} pattern found in {path.relative_to(ROOT)}")
         if path.name != ".env.example" and SENSITIVE_ASSIGNMENT.search(text):
             errors.append(f"non-example sensitive assignment found in {path.relative_to(ROOT)}")

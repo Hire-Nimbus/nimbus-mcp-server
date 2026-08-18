@@ -83,8 +83,8 @@ Parameters:
     Description: Optional operator-owned monitoring endpoint.
   UpstreamMcpUrl:
     Type: String
-    Default: ""
-    Description: Optional operator-controlled upstream MCP relay URL.
+    Default: "https://mcp.hirenimbus.com/mcp"
+    Description: Upstream MCP relay URL; override for a self-hosted upstream.
   UpstreamMcpAuthToken:
     Type: String
     NoEcho: true

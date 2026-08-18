@@ -23,11 +23,17 @@ from src.tools import (
 
 
 def test_public_configuration_has_no_private_defaults():
-    assert config.configured_external_api_urls() == []
+    assert config.UPSTREAM_MCP_URL == config.DEFAULT_UPSTREAM_MCP_URL
+    assert config.configured_external_api_urls() == [config.DEFAULT_UPSTREAM_MCP_URL]
     assert not config.APP_LINK
     assert not config.SITE_BASE_URL
-    assert not config.UPSTREAM_MCP_URL
     assert not config.UPSTREAM_MCP_AUTH_TOKEN
+
+
+def test_operator_upstream_url_override_wins(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_MCP_URL", "https://operator.example/mcp")
+
+    assert config._resolve_upstream_mcp_url() == "https://operator.example/mcp"
 
 
 def test_address_normalization_handles_profile_shape():

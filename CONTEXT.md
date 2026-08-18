@@ -22,7 +22,7 @@ _Avoid_: Built-in Nimbus integration, shared backend.
 
 **Unconfigured capability**:
 A supported MCP behavior whose operator-owned integration is absent or incomplete; it remains unavailable and must report a clear configuration error rather than silently contacting a private fallback.
-_Avoid_: Anonymous fallback, best-effort private default.
+_Avoid_: Anonymous fallback, undocumented remote service, best-effort private default.
 
 **Integration contract**:
 The documented request, response, authentication, error, and ownership boundary between an MCP capability and an operator-owned external service.
@@ -33,8 +33,8 @@ A boundary component that translates MCP capability behavior to and from an inte
 _Avoid_: Direct Supabase dependency, hardcoded service client.
 
 **Upstream MCP relay**:
-An optional operator-enabled adapter that connects the public server to another MCP server and exposes that remote capability through an explicitly configured upstream URL and credential.
-_Avoid_: REST endpoint substitution, transparent proxy, automatic inbound-token forwarding.
+An adapter that connects the public server to another MCP server and exposes that remote capability through the documented public hosted default or an explicitly configured upstream URL and credential.
+_Avoid_: REST endpoint substitution, undisclosed proxying, automatic inbound-token forwarding.
 
 **Operator identity adapter**:
 The configured boundary that verifies an MCP user's identity and loads the operator-owned profile needed by protected capabilities.
@@ -53,8 +53,8 @@ An in-memory implementation intended only for local development and tests, where
 _Avoid_: Production session store, durable state.
 
 **Open-source distribution**:
-The independently usable code and documentation published under the project's approved open-source license, with operator-supplied integrations and without private Nimbus infrastructure or data.
-_Avoid_: Public mirror of the private deployment, source-available demo.
+The independently usable code and documentation published under the project's approved open-source license, with operator-supplied integrations and without private Nimbus infrastructure, data, or credentials. A documented public hosted MCP fallback may be included for convenience.
+_Avoid_: Public mirror of the private deployment, source-available demo, undisclosed data routing.
 
 **Supported deployment target**:
 A runtime and deployment path that the project documents, tests, and treats as part of its compatibility promise: local ASGI, generic Docker, and AWS SAM/Lambda for this distribution.
@@ -77,8 +77,8 @@ The explicit user approval required immediately before a side-effecting capabili
 _Avoid_: Implied intent, preview submission.
 
 **Marketplace package**:
-A first-party distributable wrapper containing plugin metadata, skills, and an explicitly selected remote MCP endpoint for publication through an agent marketplace; it is separate from the self-hosted server distribution.
-_Avoid_: Server default, open-source runtime configuration.
+A first-party distributable wrapper containing plugin metadata, skills, and an explicitly selected remote MCP endpoint for publication through an agent marketplace; it is separate from the server's generic configuration and branding.
+_Avoid_: Undocumented server default, open-source runtime credentials.
 
 **Portable skill**:
 Vendor-neutral workflow guidance that can ship with the open-source distribution and teach compatible agent clients how to use the MCP tool surface safely.

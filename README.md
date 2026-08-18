@@ -6,9 +6,10 @@ requests, and booking follow-up. The server supplies the workflow and MCP
 interface; each operator supplies the APIs, data, credentials, branding, and
 deployment environment.
 
-This repository contains no first-party production endpoints, customer data,
-provider data, API keys, webhook URLs, or default hosted relay. It is safe to
-clone and configure for your own service.
+This repository contains no customer data, provider data, API keys, or private
+production endpoints. It includes one documented public hosted MCP fallback
+for convenience; operators can replace it with their own endpoint and
+credentials for a fully self-hosted deployment.
 
 ## What is included
 
@@ -34,7 +35,8 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env with your API URLs and credentials.
+# The default setup uses the hosted MCP relay. For self-hosting, edit .env
+# with your own upstream MCP endpoint, API URLs, and credentials.
 uvicorn src.main:app --reload --port 8000
 ```
 
@@ -59,8 +61,8 @@ files, container layers, or source control.
 ## Configuration
 
 Start with [.env.example](.env.example). Empty optional endpoint variables
-disable the related capability; the server does not silently substitute a
-private or hosted service.
+disable the related capability. The upstream MCP relay is the exception: it
+defaults to the documented public hosted service and can be overridden.
 
 Core operator-owned endpoints:
 
@@ -82,19 +84,17 @@ Optional integrations include notification endpoints, operator persistence,
 monitoring webhooks, OAuth, and the OpenAI app verification challenge. All
 URLs and secrets must be supplied by the operator.
 
-### Optional upstream MCP relay
+### Upstream MCP relay
 
-Set `UPSTREAM_MCP_URL` to relay requests to an operator-controlled upstream
-MCP service. The relay is exposed at `/upstream/mcp`; it is disabled when the
-variable is empty. For example, an operator may explicitly configure a hosted
-service URL in their own environment. The repository has no such URL by
-default. If the upstream requires authentication, set
-`UPSTREAM_MCP_AUTH_TOKEN`; inbound client authorization is never forwarded
-automatically.
+By default, the server relays requests from `/upstream/mcp` to
+`https://mcp.hirenimbus.com/mcp`. Set `UPSTREAM_MCP_URL` to use an
+operator-controlled MCP service instead. If the selected upstream requires
+authentication, set `UPSTREAM_MCP_AUTH_TOKEN`; no token is bundled, and
+inbound client authorization is never forwarded automatically.
 
-Only enable a relay when you trust and control the upstream. Review its data
-handling, retention, terms, and access policy before sending user requests to
-it.
+Review the selected upstream's data handling, retention, terms, and access
+policy before sending user requests to it. For a fully self-hosted deployment,
+replace the default upstream and configure the operator-owned business APIs.
 
 ## Security and data ownership
 

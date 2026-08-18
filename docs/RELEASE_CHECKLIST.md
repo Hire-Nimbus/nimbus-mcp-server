@@ -10,8 +10,9 @@ must be completed against the exact commit intended for release.
       data, credential, or private deployment artifact.
 - [ ] A full-history credential scan has been run. If historical secrets are
       found, publish from a fresh sanitized history and revoke the secrets.
-- [ ] The public repository contains no first-party hosted endpoint or
-      first-party API default.
+- [ ] The public repository contains no private endpoint, first-party API
+      default, customer data, or credential. The documented public hosted MCP
+      fallback is the only intentional first-party endpoint.
 - [ ] LICENSE, README.md, SECURITY.md, and operator data-ownership disclosures
       are present.
 
@@ -32,8 +33,8 @@ must be completed against the exact commit intended for release.
 ## Integration and side effects
 
 - [ ] Every required operator endpoint is explicitly configured.
-- [ ] Upstream relay is disabled unless the operator intentionally sets
-      UPSTREAM_MCP_URL.
+- [ ] The default hosted relay is documented, and operators can override it
+      with UPSTREAM_MCP_URL for a self-hosted upstream.
 - [ ] Inbound authorization is not forwarded to an upstream relay.
 - [ ] Booking/rebooking previews require explicit confirmation.
 - [ ] Confirmed writes use a client-generated idempotency_key and the operator
@@ -43,7 +44,8 @@ must be completed against the exact commit intended for release.
 
 ## Marketplace package
 
-- [ ] The public repository stays generic and self-hosted.
+- [ ] The public repository stays configurable and supports fully self-hosted
+      deployment; its hosted relay fallback is disclosed separately.
 - [ ] The first-party marketplace package lives in the private runtime
       repository and contains the intentionally selected hosted MCP URL.
 - [ ] Cursor Agent Plugin and existing Codex/OpenAI plugin manifests are
