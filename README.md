@@ -93,6 +93,10 @@ is exposed through the metadata `jwks_uri`. Set
 unique persisted client ids from `/oauth/register`; the legacy configured
 client id and unregistered PKCE clients remain supported.
 
+Use at least 32 cryptographically random bytes for `OAUTH_CLIENT_SECRET`. The
+server derives a domain-separated ES256 key from that secret so stateless
+instances publish and verify the same access-token key.
+
 ### Upstream MCP relay
 
 By default, the server relays requests from `/upstream/mcp` to

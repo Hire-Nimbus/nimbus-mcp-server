@@ -11,7 +11,7 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ""
-    Description: OAuth client secret.
+    Description: OAuth client secret; use at least 32 cryptographically random bytes because it also seeds the ES256 signing key.
   OAuthAllowedRedirectUris:
     Type: String
     Default: ""

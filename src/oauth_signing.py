@@ -19,6 +19,11 @@ _P256_ORDER = int(
 )
 _SIGNING_CONTEXT = b"nimbus-mcp/access-token-signing/v1"
 
+# OAUTH_CLIENT_SECRET is operator-managed and must be high entropy (at least
+# 32 random bytes). HKDF domain separation keeps the ES256 key distinct from
+# its client-authentication and refresh-token uses while remaining stable
+# across stateless instances.
+
 
 def _base64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
