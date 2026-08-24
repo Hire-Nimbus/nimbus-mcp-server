@@ -55,6 +55,25 @@ def test_metadata_publishes_public_jwks(monkeypatch):
     assert "d" not in public_key
 
 
+def test_server_card_is_public_and_uses_configured_mcp_host(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get("/.well-known/mcp/server-card.json")
+
+    assert response.status_code == 200
+    card = response.json()
+    assert card["transport"]["endpoint"] == "https://mcp.example.com/mcp"
+    assert card["transports"] == [
+        {
+            "type": "streamable-http",
+            "endpoint": "https://mcp.example.com/mcp",
+        }
+    ]
+    assert card["authentication"]["metadata"] == (
+        "https://mcp.example.com/.well-known/oauth-protected-resource"
+    )
+
+
 def test_dcr_issues_unique_public_clients(monkeypatch):
     _configure_oauth(monkeypatch)
     registration = {

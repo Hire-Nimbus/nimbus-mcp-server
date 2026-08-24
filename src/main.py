@@ -545,6 +545,7 @@ _TOOL_ANNOTATIONS_PATH = Path(__file__).resolve().parent.parent / "docs" / "TOOL
 _PUBLIC_PATHS = {
     "/__ping",
     "/.well-known/mcp.json",
+    "/.well-known/mcp/server-card.json",
     "/.well-known/tool-annotations",
     "/.well-known/openai-apps-challenge",
     "/.well-known/oauth-protected-resource",
@@ -1761,6 +1762,38 @@ async def mcp_manifest(request: Request):
         } if _oauth_enabled() else None,
         "capabilities": {"tools": True},
     }
+
+
+@app.get("/.well-known/mcp/server-card.json")
+async def mcp_server_card(request: Request):
+    """Publish the MCP server card without requiring authentication."""
+    base = _get_base_url(request)
+    endpoint = f"{base}/mcp"
+    card: dict[str, Any] = {
+        "$schema": "https://modelcontextprotocol.io/schemas/draft/server-card.schema.json",
+        "serverInfo": {
+            "name": MCP_SERVER_NAME,
+            "version": "1.0.0",
+            "title": BRAND_NAME,
+            "description": MCP_SERVER_DESCRIPTION,
+        },
+        "transport": {"type": "streamable-http", "endpoint": endpoint},
+        "transports": [
+            {"type": "streamable-http", "endpoint": endpoint},
+        ],
+        "capabilities": {
+            "tools": {"listChanged": True},
+            "resources": {"subscribe": False, "listChanged": False},
+            "prompts": {"listChanged": False},
+            "logging": {},
+        },
+    }
+    if _oauth_enabled():
+        card["authentication"] = {
+            "type": "oauth2",
+            "metadata": f"{base}/.well-known/oauth-protected-resource",
+        }
+    return card
 
 
 @app.get("/.well-known/tool-annotations")

@@ -29,6 +29,8 @@ must be completed against the exact commit intended for release.
       AUTH_STATE_TABLE_NAME and REQUIRE_DURABLE_STATE=true.
 - [ ] OAuth discovery publishes a public `jwks_uri`, and dynamic registration
       returns unique client ids when enabled.
+- [ ] `/.well-known/mcp/server-card.json` is public and uses the configured
+      MCP base URL for transport and OAuth metadata.
 - [ ] Operators have configured least-privilege state-table access,
       encryption, backups, TTL, and retention.
 
