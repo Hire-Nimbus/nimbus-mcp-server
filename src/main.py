@@ -218,6 +218,7 @@ def _is_allowed_origin(origin: str) -> bool:
 AUTH_CODE_TTL = 600
 REFRESH_TOKEN_TTL = 14 * 24 * 60 * 60  # 14 days
 DYNAMIC_CLIENT_TTL = 10 * 365 * 24 * 60 * 60  # 10 years
+DYNAMIC_CLIENT_REGISTRATION_RPM = 10
 _OAUTH_SCOPES_SUPPORTED = (
     "openid",
     "profile",
@@ -1433,6 +1434,19 @@ async def dynamic_registration(request: Request):
     if not _oauth_enabled() or not OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED:
         return JSONResponse({"error": "not_configured"}, status_code=404)
 
+    client_ip = request.headers.get(
+        "x-forwarded-for",
+        request.client.host if request.client else "unknown",
+    ).split(",", 1)[0].strip()
+    if check_http_rate_limit(
+        f"oauth-register:{client_ip}",
+        limit=DYNAMIC_CLIENT_REGISTRATION_RPM,
+    ):
+        return JSONResponse(
+            {"error": "rate_limited", "error_description": "Too many registration requests"},
+            status_code=429,
+        )
+
     body = await request.json()
     redirect_uris = body.get("redirect_uris") or []
     if not isinstance(redirect_uris, list) or not redirect_uris or not all(
@@ -1467,7 +1481,14 @@ async def dynamic_registration(request: Request):
         "token_endpoint_auth_method": "none",
         "scope": str(requested_scope),
     }
-    await _store_dynamic_client(registration)
+    try:
+        await _store_dynamic_client(registration)
+    except Exception as exc:
+        logger.exception("Client registration persistence failed: %s", exc)
+        return JSONResponse(
+            {"error": "server_error", "error_description": "Client registration failed"},
+            status_code=500,
+        )
     logger.info(
         "Client registration: client_name=%s redirect_uris=%s host=%s",
         body.get("client_name", "?"),

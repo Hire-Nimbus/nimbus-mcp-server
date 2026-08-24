@@ -71,6 +71,43 @@ def test_dcr_issues_unique_public_clients(monkeypatch):
     assert first.json()["client_id"] != "legacy-shared-client"
 
 
+def test_dynamic_registration_is_rate_limited(monkeypatch):
+    _configure_oauth(monkeypatch)
+    monkeypatch.setattr(main, "check_http_rate_limit", lambda *_args, **_kwargs: True)
+
+    response = TestClient(main.app).post(
+        "/oauth/register",
+        json={
+            "client_name": "Claude",
+            "redirect_uris": ["https://claude.ai/api/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+
+    assert response.status_code == 429
+
+
+def test_dynamic_registration_returns_controlled_storage_error(monkeypatch):
+    _configure_oauth(monkeypatch)
+    monkeypatch.setattr(main, "check_http_rate_limit", lambda *_args, **_kwargs: False)
+
+    async def fail_to_store(_registration):
+        raise RuntimeError("state store unavailable")
+
+    monkeypatch.setattr(main, "_store_dynamic_client", fail_to_store)
+    response = TestClient(main.app).post(
+        "/oauth/register",
+        json={
+            "client_name": "Claude",
+            "redirect_uris": ["https://claude.ai/api/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "server_error"
+
+
 def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
     _configure_oauth(monkeypatch)
     verifier = "v" * 43
