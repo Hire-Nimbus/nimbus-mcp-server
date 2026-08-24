@@ -88,7 +88,13 @@ URLs and secrets must be supplied by the operator.
 
 When OAuth is enabled, access tokens use ES256 and the public verification key
 is exposed through the metadata `jwks_uri`. Set
-`OAUTH_ALLOWED_REDIRECT_URIS` to the exact callbacks your clients use. Enable
+`OAUTH_ALLOWED_REDIRECT_URIS` to the exact hosted or claimed-scheme callbacks
+your clients use. Native clients may register HTTP loopback callbacks on
+`localhost`, `127.0.0.1`, or `[::1]` with any explicit port; these do not need
+to be enumerated because native apps commonly bind an ephemeral port. Other
+custom schemes (including arbitrary `cursor://` or `vscode://` callbacks) are
+rejected unless their complete URI is explicitly configured, since dynamic
+registration alone does not prove ownership of a private scheme. Enable
 `OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED` to let public PKCE clients obtain
 unique persisted client ids from `/oauth/register`; the legacy configured
 client id and unregistered PKCE clients remain supported.

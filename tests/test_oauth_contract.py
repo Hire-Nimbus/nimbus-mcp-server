@@ -92,6 +92,44 @@ def test_dcr_issues_unique_public_clients(monkeypatch):
     assert first.json()["client_id"] != "legacy-shared-client"
 
 
+def test_dcr_accepts_native_loopback_redirect_with_ephemeral_port(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/oauth/register",
+        json={
+            "client_name": "Native MCP client",
+            "redirect_uris": ["http://localhost:54321/cb"],
+            "token_endpoint_auth_method": "none",
+        },
+    )
+
+    assert response.status_code == 201
+
+
+def test_redirect_allowlist_accepts_only_valid_loopback_exceptions(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    for redirect_uri in (
+        "http://localhost:54321/cb",
+        "http://127.0.0.1:54322/oauth/callback",
+        "http://[::1]:54323/callback?client=native",
+    ):
+        assert main._is_allowed_redirect_uri(redirect_uri)
+
+    for redirect_uri in (
+        "https://localhost:54321/cb",
+        "http://localhost.evil.example:54321/cb",
+        "http://127.0.0.1.evil.example:54321/cb",
+        "http://user@localhost:54321/cb",
+        "http://localhost/cb",
+        "http://localhost:99999/cb",
+        "vscode://unregistered-client/callback",
+        "https://evil.example.com/cb",
+    ):
+        assert not main._is_allowed_redirect_uri(redirect_uri)
+
+
 def test_dynamic_registration_is_rate_limited(monkeypatch):
     _configure_oauth(monkeypatch)
     monkeypatch.setattr(main, "check_http_rate_limit", lambda *_args, **_kwargs: True)

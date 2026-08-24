@@ -10,7 +10,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import ParseResult, urlencode, urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
 import httpx
@@ -417,11 +417,36 @@ def _normalize_phone(phone_number: str) -> str:
     return AUTH_PHONE_ALIASES.get(phone_number, phone_number)
 
 
+_OAUTH_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _is_oauth_loopback_redirect(parsed: ParseResult) -> bool:
+    """Accept native-app loopback callbacks on any explicitly bound port."""
+    if parsed.scheme != "http" or parsed.username or parsed.password:
+        return False
+    if parsed.hostname not in _OAUTH_LOOPBACK_HOSTS:
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return port is not None and 1 <= port <= 65535
+
+
 def _is_allowed_redirect_uri(redirect_uri: str) -> bool:
     if not redirect_uri:
         return False
+    try:
+        parsed = urlparse(redirect_uri)
+    except ValueError:
+        return False
+    if parsed.fragment:
+        return False
+    if _is_oauth_loopback_redirect(parsed):
+        return True
     if not OAUTH_ALLOWED_REDIRECT_URIS:
         return False
+    # Hosted callbacks and claimed private schemes remain exact-match only.
     return redirect_uri in OAUTH_ALLOWED_REDIRECT_URIS
 
 
