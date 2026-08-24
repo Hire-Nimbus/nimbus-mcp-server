@@ -158,6 +158,20 @@ def _known_ai_service(value: Any) -> str | None:
     return None
 
 
+def _ai_service_for_oauth_redirect(redirect_uri: str | None) -> str | None:
+    """Return identity proven by possession of a platform-controlled callback."""
+    normalized = str(redirect_uri or "")
+    if not _is_allowed_redirect_uri(normalized):
+        return None
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return None
+    if parsed.scheme != "https":
+        return None
+    return _known_ai_service(identify_ai_service(redirect_uri=normalized))
+
+
 def _is_static_mvp_token(token: str) -> bool:
     """True when request bearer token matches configured MVP static token."""
     if not MVP_STATIC_MCP_TOKEN:
@@ -960,9 +974,7 @@ async def authorize_endpoint(request: Request):
                     "ho_profile": ho_profile,
                     "ho_session": ho_session,
                     "phone_number": phone_number,
-                    "ai_service": _known_ai_service(
-                        identify_ai_service(redirect_uri=str(redirect_uri))
-                    ),
+                    "ai_service": _ai_service_for_oauth_redirect(str(redirect_uri)),
                 })
 
                 callback_params = {"code": code}
@@ -1297,12 +1309,7 @@ async def token_endpoint(request: Request):
             "iat": now,
             "exp": now + OAUTH_TOKEN_TTL,
         }
-        ai_service = (
-            _known_ai_service(stored.get("ai_service"))
-            or _known_ai_service(
-                identify_ai_service(redirect_uri=stored.get("redirect_uri"))
-            )
-        )
+        ai_service = _known_ai_service(stored.get("ai_service"))
         if ai_service:
             claims["ai_service"] = ai_service
 

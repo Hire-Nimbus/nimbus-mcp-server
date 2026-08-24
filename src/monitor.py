@@ -79,13 +79,11 @@ def identify_ai_service(
     origin: Optional[str] = None,
     user_agent: Optional[str] = None,
 ) -> str:
-    """Map trusted OAuth and request hints to a platform label."""
+    """Map observational OAuth/request hints to a platform label."""
     redirect = (redirect_uri or "").lower()
     if (
         "cursor.com/agents/mcp/oauth/callback" in redirect
         or redirect.startswith("cursor://anysphere.cursor-mcp/")
-        or "localhost:8787/callback" in redirect
-        or "127.0.0.1:8787/callback" in redirect
     ):
         return "Grok Bot"
 

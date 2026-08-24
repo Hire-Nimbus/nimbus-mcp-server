@@ -151,6 +151,7 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
                 "code_challenge_method": "S256",
                 "scope": "openid profile email offline_access",
                 "ho_profile": {},
+                "ai_service": "Claude",
             }
         )
     )
@@ -221,3 +222,66 @@ def test_unregistered_pkce_client_can_still_start_login(monkeypatch):
     )
 
     assert response.status_code == 200
+
+
+def test_unregistered_localhost_pkce_client_cannot_claim_grok_bot(monkeypatch):
+    _configure_oauth(monkeypatch)
+    monkeypatch.setattr(
+        main,
+        "OAUTH_ALLOWED_REDIRECT_URIS",
+        ["http://localhost:8787/callback"],
+    )
+    assert main._ai_service_for_oauth_redirect(
+        "http://localhost:8787/callback"
+    ) is None
+
+    verifier = "v" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+    client_id = "generic-local-pkce-client"
+    redirect_uri = "http://localhost:8787/callback"
+    client = TestClient(main.app)
+
+    authorization = client.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "mcp",
+        },
+    )
+    assert authorization.status_code == 200
+
+    code = asyncio.run(
+        main._store_auth_grant(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "scope": "mcp",
+                "ho_profile": {},
+            }
+        )
+    )
+    token_response = client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": client_id,
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": redirect_uri,
+        },
+    )
+
+    assert token_response.status_code == 200
+    claims = jwt.decode(
+        token_response.json()["access_token"],
+        options={"verify_signature": False},
+    )
+    assert "ai_service" not in claims
