@@ -35,8 +35,14 @@ from src.config import (
     REQUIRE_DURABLE_STATE,
     configured_external_api_urls,
 )
-from src.auth_context import current_actor_id, current_ho_profile
+from src.auth_context import (
+    current_actor_id,
+    current_ai_service,
+    current_ho_profile,
+    current_request_meta,
+)
 from src.adapters import operator_request
+from src.monitor import identify_ai_service
 from src.security import (
     ValidationError,
     build_allowed_hosts,
@@ -56,9 +62,25 @@ from src.state import InMemoryStateStore, StateStore, StateStoreError, build_sta
 logger = logging.getLogger("nimbus-mcp.tools")
 
 _ALLOWED_API_HOSTS = build_allowed_hosts(configured_external_api_urls())
+_KNOWN_AI_SERVICES = {"ChatGPT", "Claude", "Gemini", "Grok", "Grok Bot"}
 
 _tools_http_client: httpx.AsyncClient | None = None
 _idempotency_store: StateStore | None = None
+
+
+def _booking_source(requested_source: Any) -> str:
+    """Prefer server-owned client attribution over a model-provided label."""
+    ai_service = str(current_ai_service.get() or "").strip()
+    if ai_service not in _KNOWN_AI_SERVICES:
+        meta = current_request_meta.get() or {}
+        ai_service = identify_ai_service(
+            redirect_uri=meta.get("redirect_uri"),
+            origin=meta.get("origin"),
+            user_agent=meta.get("user_agent"),
+        )
+    if ai_service in _KNOWN_AI_SERVICES:
+        return ai_service
+    return (str(requested_source or "AI Assistant").strip() or "AI Assistant")[:40]
 
 
 def _get_idempotency_store() -> StateStore:
@@ -1335,7 +1357,7 @@ def _format_display_phone(phone: str) -> str:
 
 
 async def create_booking(args: Dict[str, Any]) -> BookingResult:
-    source = str(args.get("source") or "MCP").strip()[:40]
+    source = _booking_source(args.get("source"))
 
     try:
         service_provider_slug = validate_slug(str(args.get("serviceProviderSlug") or ""))

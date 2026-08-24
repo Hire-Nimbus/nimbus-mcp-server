@@ -50,6 +50,7 @@ from src.config import (
     configured_external_api_urls,
 )
 from src.auth_context import (
+    current_ai_service,
     current_ho_profile,
     current_actor_id,
     current_ho_session_id,
@@ -58,6 +59,7 @@ from src.auth_context import (
 from src.adapters import operator_request
 from src.mcp_server import mcp
 from src.monitor import (
+    identify_ai_service,
     notify_login_success,
     notify_token_issued,
     request_meta_from_request,
@@ -147,6 +149,22 @@ def _get_base_url(request: Request) -> str:
 
 def _oauth_enabled() -> bool:
     return bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET)
+
+
+def _known_ai_service(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if normalized in {"ChatGPT", "Claude", "Gemini", "Grok", "Grok Bot"}:
+        return normalized
+    return None
+
+
+def _ai_service_from_request(request: Request) -> str | None:
+    return _known_ai_service(
+        identify_ai_service(
+            origin=request.headers.get("origin"),
+            user_agent=request.headers.get("user-agent"),
+        )
+    )
 
 
 def _is_static_mvp_token(token: str) -> bool:
@@ -567,6 +585,7 @@ async def security_middleware(request: Request, call_next) -> Response:
     client_ip = client_ip.split(",")[0].strip()
     request_meta = request_meta_from_request(request)
     set_request_meta(request_meta)
+    current_ai_service.set(None)
     if check_http_rate_limit(f"ip:{client_ip}", limit=RATE_LIMIT_RPM):
         logger.warning("Rate limited (IP): %s", client_ip)
         return JSONResponse({"error": "rate_limited", "message": "Too many requests"}, status_code=429)
@@ -600,6 +619,7 @@ async def security_middleware(request: Request, call_next) -> Response:
             current_is_authenticated.set(True)
             current_ho_session_id.set(None)
             current_ho_profile.set(None)
+            current_ai_service.set(_ai_service_from_request(request))
             response = await call_next(request)
             _add_security_headers(response)
             logger.info("<< %s %s -> %s (mvp static token)", method, path, response.status_code)
@@ -638,6 +658,10 @@ async def security_middleware(request: Request, call_next) -> Response:
             actor_sub = str(claims.get("sub") or "unknown")
             current_actor_id.set(actor_sub)
             current_is_authenticated.set(True)
+            current_ai_service.set(
+                _known_ai_service(claims.get("ai_service"))
+                or _ai_service_from_request(request)
+            )
             ho_session = str(claims.get("ho_session") or "") or None
             current_ho_session_id.set(ho_session)
             if check_http_rate_limit(f"user:{actor_sub}:{path}", limit=USER_RATE_LIMIT_RPM):
@@ -949,6 +973,9 @@ async def authorize_endpoint(request: Request):
                     "ho_profile": ho_profile,
                     "ho_session": ho_session,
                     "phone_number": phone_number,
+                    "ai_service": _known_ai_service(
+                        identify_ai_service(redirect_uri=str(redirect_uri))
+                    ),
                 })
 
                 callback_params = {"code": code}
@@ -1283,6 +1310,15 @@ async def token_endpoint(request: Request):
             "iat": now,
             "exp": now + OAUTH_TOKEN_TTL,
         }
+        ai_service = (
+            _known_ai_service(stored.get("ai_service"))
+            or _known_ai_service(
+                identify_ai_service(redirect_uri=stored.get("redirect_uri"))
+            )
+            or _ai_service_from_request(request)
+        )
+        if ai_service:
+            claims["ai_service"] = ai_service
 
         ho_profile = _trim_profile(stored.get("ho_profile") or {})
         ho_session = str(stored.get("ho_session") or "")
@@ -1306,6 +1342,7 @@ async def token_endpoint(request: Request):
             "ho_session": ho_session,
             "phone_number": stored.get("phone_number"),
             "resource": resource,
+            "ai_service": ai_service,
         })
 
         logger.info("Token exchange successful for client %s", client_id)
@@ -1373,6 +1410,12 @@ async def token_endpoint(request: Request):
             "iat": now,
             "exp": now + OAUTH_TOKEN_TTL,
         }
+        ai_service = (
+            _known_ai_service(stored_rt.get("ai_service"))
+            or _ai_service_from_request(request)
+        )
+        if ai_service:
+            claims["ai_service"] = ai_service
         if ho_profile:
             claims["ho_profile"] = ho_profile
         if ho_session:
@@ -1393,6 +1436,7 @@ async def token_endpoint(request: Request):
             "ho_session": ho_session,
             "phone_number": stored_rt.get("phone_number"),
             "resource": resource,
+            "ai_service": ai_service,
         })
 
         return {
@@ -1411,10 +1455,17 @@ async def token_endpoint(request: Request):
 
         now = time.time()
         resource = f"{base}/mcp"
-        access_token = encode_access_token(
-            {"sub": client_id, "scope": "mcp", "aud": resource, "iat": now, "exp": now + OAUTH_TOKEN_TTL},
-            OAUTH_CLIENT_SECRET,
-        )
+        claims: dict[str, Any] = {
+            "sub": client_id,
+            "scope": "mcp",
+            "aud": resource,
+            "iat": now,
+            "exp": now + OAUTH_TOKEN_TTL,
+        }
+        ai_service = _ai_service_from_request(request)
+        if ai_service:
+            claims["ai_service"] = ai_service
+        access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
         return {
             "access_token": access_token,
             "token_type": "Bearer",

@@ -10,6 +10,8 @@ import jwt
 from fastapi.testclient import TestClient
 
 from src import main
+from src import tools
+from src.auth_context import current_request_meta
 from src.state import InMemoryStateStore
 
 
@@ -173,6 +175,7 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
         audience=resource,
     )
     assert claims["sub"] == client_id
+    assert claims["ai_service"] == "Claude"
 
     protected = client.post(
         "/tools/search_providers",
@@ -180,6 +183,16 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
         json={},
     )
     assert protected.status_code == 422
+
+
+def test_booking_source_uses_server_owned_chatgpt_request_hint():
+    meta_token = current_request_meta.set(
+        {"origin": "https://chatgpt.com", "user_agent": "ChatGPT"}
+    )
+    try:
+        assert tools._booking_source("AI Assistant") == "ChatGPT"
+    finally:
+        current_request_meta.reset(meta_token)
 
 
 def test_unregistered_pkce_client_can_still_start_login(monkeypatch):

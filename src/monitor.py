@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
 from starlette.requests import Request
@@ -58,6 +59,61 @@ def request_meta_from_request(request: Request) -> Dict[str, Any]:
 
 def set_request_meta(meta: Dict[str, Any]) -> None:
     current_request_meta.set(meta)
+
+
+def _hostname_from_url(value: Optional[str]) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    try:
+        return (urlparse(raw).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def identify_ai_service(
+    *,
+    redirect_uri: Optional[str] = None,
+    origin: Optional[str] = None,
+    user_agent: Optional[str] = None,
+) -> str:
+    """Map trusted OAuth and request hints to a platform label."""
+    redirect = (redirect_uri or "").lower()
+    if (
+        "cursor.com/agents/mcp/oauth/callback" in redirect
+        or redirect.startswith("cursor://anysphere.cursor-mcp/")
+        or "localhost:8787/callback" in redirect
+        or "127.0.0.1:8787/callback" in redirect
+    ):
+        return "Grok Bot"
+
+    for hint in (redirect_uri, origin):
+        host = _hostname_from_url(hint)
+        if host in {"chatgpt.com", "chat.openai.com", "openai.com"} or host.endswith(".openai.com"):
+            return "ChatGPT"
+        if host == "claude.ai" or host.endswith(".anthropic.com"):
+            return "Claude"
+        if host in {"cursor.com", "www.cursor.com"} or host.endswith(".cursor.com"):
+            return "Grok Bot"
+        if host in {"grok.com", "www.grok.com", "x.ai", "x.com", "www.x.com"} or host.endswith(".x.ai"):
+            return "Grok"
+        if host == "gemini.google.com":
+            return "Gemini"
+
+    ua = (user_agent or "").lower()
+    if "chatgpt" in ua or "openai" in ua:
+        return "ChatGPT"
+    if "claude" in ua or "anthropic" in ua:
+        return "Claude"
+    if "grok bot" in ua or "cursor" in ua:
+        return "Grok Bot"
+    if "grok" in ua or "xai" in ua or "x.ai" in ua:
+        return "Grok"
+    if "gemini" in ua:
+        return "Gemini"
+    return "Unknown"
 
 
 def _profile_name(profile: Dict[str, Any]) -> str:

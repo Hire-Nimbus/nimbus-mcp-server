@@ -28,6 +28,12 @@ current_request_meta: contextvars.ContextVar[Optional[Dict[str, Any]]] = context
     default=None,
 )
 
+# Server-owned identity of the AI client for the current authenticated request.
+current_ai_service: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_ai_service",
+    default=None,
+)
+
 # Authenticated actor id (JWT sub or static token id) for per-user rate limiting.
 current_actor_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_actor_id",
