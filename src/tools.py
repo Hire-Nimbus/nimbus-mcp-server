@@ -39,10 +39,8 @@ from src.auth_context import (
     current_actor_id,
     current_ai_service,
     current_ho_profile,
-    current_request_meta,
 )
 from src.adapters import operator_request
-from src.monitor import identify_ai_service
 from src.security import (
     ValidationError,
     build_allowed_hosts,
@@ -69,18 +67,11 @@ _idempotency_store: StateStore | None = None
 
 
 def _booking_source(requested_source: Any) -> str:
-    """Prefer server-owned client attribution over a model-provided label."""
+    """Use signed client attribution, falling back to a generic MCP label."""
     ai_service = str(current_ai_service.get() or "").strip()
-    if ai_service not in _KNOWN_AI_SERVICES:
-        meta = current_request_meta.get() or {}
-        ai_service = identify_ai_service(
-            redirect_uri=meta.get("redirect_uri"),
-            origin=meta.get("origin"),
-            user_agent=meta.get("user_agent"),
-        )
     if ai_service in _KNOWN_AI_SERVICES:
         return ai_service
-    return (str(requested_source or "AI Assistant").strip() or "AI Assistant")[:40]
+    return "AI Assistant"
 
 
 def _get_idempotency_store() -> StateStore:

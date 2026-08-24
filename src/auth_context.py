@@ -29,6 +29,8 @@ current_request_meta: contextvars.ContextVar[Optional[Dict[str, Any]]] = context
 )
 
 # Server-owned identity of the AI client for the current authenticated request.
+# This is derived only from signed OAuth claims, never from request headers or
+# the model-provided booking `source` argument.
 current_ai_service: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_ai_service",
     default=None,

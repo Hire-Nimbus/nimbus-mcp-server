@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src import main
 from src import tools
-from src.auth_context import current_request_meta
+from src.auth_context import current_ai_service, current_request_meta
 from src.state import InMemoryStateStore
 
 
@@ -185,14 +185,24 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
     assert protected.status_code == 422
 
 
-def test_booking_source_uses_server_owned_chatgpt_request_hint():
+def test_booking_source_uses_signed_chatgpt_identity():
+    service_token = current_ai_service.set("ChatGPT")
+    try:
+        assert tools._booking_source("AI Assistant") == "ChatGPT"
+    finally:
+        current_ai_service.reset(service_token)
+
+
+def test_booking_source_rejects_spoofed_chatgpt_request_hint_and_argument():
+    service_token = current_ai_service.set(None)
     meta_token = current_request_meta.set(
         {"origin": "https://chatgpt.com", "user_agent": "ChatGPT"}
     )
     try:
-        assert tools._booking_source("AI Assistant") == "ChatGPT"
+        assert tools._booking_source("OpenAI ChatGPT") == "AI Assistant"
     finally:
         current_request_meta.reset(meta_token)
+        current_ai_service.reset(service_token)
 
 
 def test_unregistered_pkce_client_can_still_start_login(monkeypatch):

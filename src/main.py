@@ -158,15 +158,6 @@ def _known_ai_service(value: Any) -> str | None:
     return None
 
 
-def _ai_service_from_request(request: Request) -> str | None:
-    return _known_ai_service(
-        identify_ai_service(
-            origin=request.headers.get("origin"),
-            user_agent=request.headers.get("user-agent"),
-        )
-    )
-
-
 def _is_static_mvp_token(token: str) -> bool:
     """True when request bearer token matches configured MVP static token."""
     if not MVP_STATIC_MCP_TOKEN:
@@ -619,7 +610,6 @@ async def security_middleware(request: Request, call_next) -> Response:
             current_is_authenticated.set(True)
             current_ho_session_id.set(None)
             current_ho_profile.set(None)
-            current_ai_service.set(_ai_service_from_request(request))
             response = await call_next(request)
             _add_security_headers(response)
             logger.info("<< %s %s -> %s (mvp static token)", method, path, response.status_code)
@@ -658,10 +648,7 @@ async def security_middleware(request: Request, call_next) -> Response:
             actor_sub = str(claims.get("sub") or "unknown")
             current_actor_id.set(actor_sub)
             current_is_authenticated.set(True)
-            current_ai_service.set(
-                _known_ai_service(claims.get("ai_service"))
-                or _ai_service_from_request(request)
-            )
+            current_ai_service.set(_known_ai_service(claims.get("ai_service")))
             ho_session = str(claims.get("ho_session") or "") or None
             current_ho_session_id.set(ho_session)
             if check_http_rate_limit(f"user:{actor_sub}:{path}", limit=USER_RATE_LIMIT_RPM):
@@ -1315,7 +1302,6 @@ async def token_endpoint(request: Request):
             or _known_ai_service(
                 identify_ai_service(redirect_uri=stored.get("redirect_uri"))
             )
-            or _ai_service_from_request(request)
         )
         if ai_service:
             claims["ai_service"] = ai_service
@@ -1410,10 +1396,7 @@ async def token_endpoint(request: Request):
             "iat": now,
             "exp": now + OAUTH_TOKEN_TTL,
         }
-        ai_service = (
-            _known_ai_service(stored_rt.get("ai_service"))
-            or _ai_service_from_request(request)
-        )
+        ai_service = _known_ai_service(stored_rt.get("ai_service"))
         if ai_service:
             claims["ai_service"] = ai_service
         if ho_profile:
@@ -1462,9 +1445,6 @@ async def token_endpoint(request: Request):
             "iat": now,
             "exp": now + OAUTH_TOKEN_TTL,
         }
-        ai_service = _ai_service_from_request(request)
-        if ai_service:
-            claims["ai_service"] = ai_service
         access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
         return {
             "access_token": access_token,
