@@ -12,6 +12,17 @@ Parameters:
     NoEcho: true
     Default: ""
     Description: OAuth client secret.
+  OAuthAllowedRedirectUris:
+    Type: String
+    Default: ""
+    Description: Comma-separated OAuth redirect URI allowlist.
+  OAuthDynamicClientRegistrationEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable RFC 7591 public-client registration.
   PublicBaseUrl:
     Type: String
     Default: ""
@@ -149,6 +160,8 @@ Resources:
           UPSTREAM_MCP_AUTH_TOKEN: !Ref UpstreamMcpAuthToken
           OAUTH_CLIENT_ID: !Ref OAuthClientId
           OAUTH_CLIENT_SECRET: !Ref OAuthClientSecret
+          OAUTH_ALLOWED_REDIRECT_URIS: !Ref OAuthAllowedRedirectUris
+          OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED: !Ref OAuthDynamicClientRegistrationEnabled
           PUBLIC_BASE_URL: !Ref PublicBaseUrl
           ALLOWED_ORIGINS: !Ref AllowedOrigins
           MVP_STATIC_MCP_TOKEN: !Ref MvpStaticMcpToken

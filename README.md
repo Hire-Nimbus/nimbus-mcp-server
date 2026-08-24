@@ -84,6 +84,15 @@ Optional integrations include notification endpoints, operator persistence,
 monitoring webhooks, OAuth, and the OpenAI app verification challenge. All
 URLs and secrets must be supplied by the operator.
 
+### OAuth interoperability
+
+When OAuth is enabled, access tokens use ES256 and the public verification key
+is exposed through the metadata `jwks_uri`. Set
+`OAUTH_ALLOWED_REDIRECT_URIS` to the exact callbacks your clients use. Enable
+`OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED` to let public PKCE clients obtain
+unique persisted client ids from `/oauth/register`; the legacy configured
+client id and unregistered PKCE clients remain supported.
+
 ### Upstream MCP relay
 
 By default, the server relays requests from `/upstream/mcp` to

@@ -63,6 +63,7 @@ from src.monitor import (
     request_meta_from_request,
     set_request_meta,
 )
+from src.oauth_signing import access_token_jwk, decode_access_token, encode_access_token
 from src.security import (
     build_allowed_hosts,
     check_http_rate_limit,
@@ -216,6 +217,7 @@ def _is_allowed_origin(origin: str) -> bool:
 
 AUTH_CODE_TTL = 600
 REFRESH_TOKEN_TTL = 14 * 24 * 60 * 60  # 14 days
+DYNAMIC_CLIENT_TTL = 10 * 365 * 24 * 60 * 60  # 10 years
 
 _state_store: StateStore | None = None
 
@@ -302,6 +304,20 @@ async def _consume_auth_grant(code: str) -> dict[str, Any] | None:
     """Atomically consume an authorization grant exactly once."""
 
     return await _get_state_store().consume(f"grant:{code}")
+
+
+async def _store_dynamic_client(registration: dict[str, Any]) -> None:
+    """Persist an RFC 7591 public-client registration."""
+
+    await _get_state_store().put(
+        f"client:{registration['client_id']}",
+        registration,
+        int(time.time()) + DYNAMIC_CLIENT_TTL,
+    )
+
+
+async def _resolve_dynamic_client(client_id: str) -> dict[str, Any] | None:
+    return await _get_state_store().get(f"client:{client_id}")
 
 
 async def _store_ho_session(profile: dict[str, Any], upstream_token: str) -> str:
@@ -496,7 +512,12 @@ _PUBLIC_PATHS = {
     "/.well-known/tool-annotations",
     "/.well-known/openai-apps-challenge",
     "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
     "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-authorization-server/mcp",
+    "/.well-known/openid-configuration",
+    "/.well-known/jwks.json",
+    "/jwks.json",
     "/oauth/authorize",
     "/oauth/token",
     "/oauth/register",
@@ -584,11 +605,9 @@ async def security_middleware(request: Request, call_next) -> Response:
                 },
             )
         try:
-            claims = jwt.decode(
+            claims = decode_access_token(
                 token,
                 OAUTH_CLIENT_SECRET,
-                algorithms=["HS256"],
-                options={"require": ["exp", "sub"]},
                 audience=f"{base}/mcp",
             )
             if "sub" not in claims:
@@ -684,6 +703,7 @@ def _add_security_headers(response: Response, allow_frame: bool = False) -> None
 
 
 @app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
 async def protected_resource_metadata(request: Request):
     base = _get_base_url(request)
     return {
@@ -702,6 +722,7 @@ async def protected_resource_metadata(request: Request):
 
 
 @app.get("/.well-known/oauth-authorization-server")
+@app.get("/.well-known/oauth-authorization-server/mcp")
 async def auth_server_metadata(request: Request):
     base = _get_base_url(request)
     out = {
@@ -709,6 +730,7 @@ async def auth_server_metadata(request: Request):
         "authorization_endpoint": f"{base}/oauth/authorize",
         "token_endpoint": f"{base}/oauth/token",
         "revocation_endpoint": f"{base}/oauth/revoke",
+        "jwks_uri": f"{base}/.well-known/jwks.json",
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "response_types_supported": ["code"],
@@ -725,6 +747,23 @@ async def auth_server_metadata(request: Request):
     if OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED:
         out["registration_endpoint"] = f"{base}/oauth/register"
     return out
+
+
+@app.get("/.well-known/openid-configuration")
+async def openid_compatible_metadata(request: Request):
+    """Serve OAuth metadata at the OIDC compatibility URL probed by clients."""
+
+    return await auth_server_metadata(request)
+
+
+@app.get("/.well-known/jwks.json")
+@app.get("/jwks.json")
+async def oauth_jwks():
+    """Publish the public key used to verify MCP access tokens."""
+
+    if not _oauth_enabled():
+        return {"keys": []}
+    return {"keys": [access_token_jwk(OAUTH_CLIENT_SECRET)]}
 
 
 # -----------  OAuth authorize (Authorization Code + PKCE + phone/OTP login)  -----------
@@ -780,9 +819,6 @@ async def authorize_endpoint(request: Request):
         logger.warning("Rejecting unregistered client_id=%s without PKCE", client_id)
         return JSONResponse({"error": "invalid_client"}, status_code=400)
 
-    if client_id != OAUTH_CLIENT_ID:
-        logger.info("Accepting unregistered client_id=%s (PKCE present)", client_id)
-
     if not redirect_uri:
         return JSONResponse({"error": "invalid_request", "error_description": "redirect_uri required"}, status_code=400)
     if not _is_allowed_redirect_uri(str(redirect_uri)):
@@ -790,6 +826,21 @@ async def authorize_endpoint(request: Request):
             {"error": "invalid_request", "error_description": "redirect_uri not allowed"},
             status_code=400,
         )
+
+    if client_id != OAUTH_CLIENT_ID:
+        registered_client = await _resolve_dynamic_client(str(client_id))
+        if registered_client:
+            registered_redirects = registered_client.get("redirect_uris") or []
+            if redirect_uri not in registered_redirects:
+                return JSONResponse(
+                    {
+                        "error": "invalid_request",
+                        "error_description": "redirect_uri is not registered for this client",
+                    },
+                    status_code=400,
+                )
+        else:
+            logger.info("Accepting unregistered client_id=%s (PKCE present)", client_id)
 
     if not code_challenge:
         return JSONResponse(
@@ -1242,11 +1293,7 @@ async def token_endpoint(request: Request):
         if ho_profile.get("ho_address"):
             claims["ho_address"] = ho_profile.get("ho_address")
 
-        access_token = jwt.encode(
-            claims,
-            OAUTH_CLIENT_SECRET,
-            algorithm="HS256",
-        )
+        access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
 
         refresh_token = await _issue_refresh_token({
             "client_id": client_id,
@@ -1333,11 +1380,7 @@ async def token_endpoint(request: Request):
         if ho_profile.get("ho_address"):
             claims["ho_address"] = ho_profile.get("ho_address")
 
-        access_token = jwt.encode(
-            claims,
-            OAUTH_CLIENT_SECRET,
-            algorithm="HS256",
-        )
+        access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
 
         new_refresh_token = await _issue_refresh_token({
             "client_id": client_id,
@@ -1364,10 +1407,9 @@ async def token_endpoint(request: Request):
 
         now = time.time()
         resource = f"{base}/mcp"
-        access_token = jwt.encode(
+        access_token = encode_access_token(
             {"sub": client_id, "scope": "mcp", "aud": resource, "iat": now, "exp": now + OAUTH_TOKEN_TTL},
             OAUTH_CLIENT_SECRET,
-            algorithm="HS256",
         )
         return {
             "access_token": access_token,
@@ -1389,20 +1431,47 @@ async def dynamic_registration(request: Request):
         return JSONResponse({"error": "not_configured"}, status_code=404)
 
     body = await request.json()
+    redirect_uris = body.get("redirect_uris") or []
+    if not isinstance(redirect_uris, list) or not redirect_uris or not all(
+        isinstance(uri, str) and _is_allowed_redirect_uri(uri)
+        for uri in redirect_uris
+    ):
+        return JSONResponse(
+            {"error": "invalid_redirect_uri", "error_description": "Unsupported redirect URI"},
+            status_code=400,
+        )
+
+    token_auth_method = body.get("token_endpoint_auth_method") or "none"
+    if token_auth_method != "none":
+        return JSONResponse(
+            {
+                "error": "invalid_client_metadata",
+                "error_description": "Only public clients are supported",
+            },
+            status_code=400,
+        )
+
+    requested_scope = body.get("scope") or "mcp"
+    if isinstance(requested_scope, list):
+        requested_scope = " ".join(str(item) for item in requested_scope)
+    registration = {
+        "client_id": f"nimbus_{secrets.token_urlsafe(24)}",
+        "client_id_issued_at": int(time.time()),
+        "client_name": body.get("client_name", "MCP Client"),
+        "redirect_uris": redirect_uris,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": str(requested_scope),
+    }
+    await _store_dynamic_client(registration)
     logger.info(
         "Client registration: client_name=%s redirect_uris=%s host=%s",
         body.get("client_name", "?"),
         body.get("redirect_uris", []),
         request.headers.get("host", "?"),
     )
-    return {
-        "client_id": OAUTH_CLIENT_ID,
-        "client_name": body.get("client_name", "MCP Client"),
-        "redirect_uris": body.get("redirect_uris", []),
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    }
+    return JSONResponse(registration, status_code=201)
 
 
 # -----------  OAuth revocation (best-effort)  -----------

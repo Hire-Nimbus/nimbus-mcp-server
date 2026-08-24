@@ -27,6 +27,8 @@ must be completed against the exact commit intended for release.
 - [ ] Dockerfile.lambda is used only by SAM/Lambda packaging.
 - [ ] Production OAuth and idempotency deployments set
       AUTH_STATE_TABLE_NAME and REQUIRE_DURABLE_STATE=true.
+- [ ] OAuth discovery publishes a public `jwks_uri`, and dynamic registration
+      returns unique client ids when enabled.
 - [ ] Operators have configured least-privilege state-table access,
       encryption, backups, TTL, and retention.
 
