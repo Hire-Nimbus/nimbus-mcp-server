@@ -98,7 +98,7 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
             "redirect_uri": redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
-            "scope": "mcp",
+            "scope": "openid profile email offline_access",
         },
     )
     assert authorization.status_code == 200
@@ -110,7 +110,7 @@ def test_dcr_client_can_authorize_exchange_and_use_access_token(monkeypatch):
                 "redirect_uri": redirect_uri,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "scope": "mcp",
+                "scope": "openid profile email offline_access",
                 "ho_profile": {},
             }
         )

@@ -218,6 +218,18 @@ def _is_allowed_origin(origin: str) -> bool:
 AUTH_CODE_TTL = 600
 REFRESH_TOKEN_TTL = 14 * 24 * 60 * 60  # 14 days
 DYNAMIC_CLIENT_TTL = 10 * 365 * 24 * 60 * 60  # 10 years
+_OAUTH_SCOPES_SUPPORTED = (
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "mcp",
+    "mcp:read",
+    "mcp:write",
+    "jobs:read",
+    "jobs:write",
+    "homeowner:read",
+)
 
 _state_store: StateStore | None = None
 
@@ -614,7 +626,12 @@ async def security_middleware(request: Request, call_next) -> Response:
                 raise jwt.InvalidTokenError("sub missing")
             token_scope = str(claims.get("scope") or "")
             if token_scope and "mcp" not in token_scope.split():
-                raise jwt.InvalidTokenError("insufficient_scope")
+                logger.info(
+                    "Accepting token without explicit 'mcp' scope for %s %s (scope=%s)",
+                    method,
+                    path,
+                    token_scope,
+                )
 
             request.state.jwt_claims = claims  # type: ignore[attr-defined]
             actor_sub = str(claims.get("sub") or "unknown")
@@ -710,14 +727,7 @@ async def protected_resource_metadata(request: Request):
         "resource": f"{base}/mcp",
         "authorization_servers": [base],
         "bearer_methods_supported": ["header"],
-        "scopes_supported": [
-            "mcp",
-            "mcp:read",
-            "mcp:write",
-            "jobs:read",
-            "jobs:write",
-            "homeowner:read",
-        ],
+        "scopes_supported": list(_OAUTH_SCOPES_SUPPORTED),
     }
 
 
@@ -734,14 +744,7 @@ async def auth_server_metadata(request: Request):
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic", "none"],
         "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
         "response_types_supported": ["code"],
-        "scopes_supported": [
-            "mcp",
-            "mcp:read",
-            "mcp:write",
-            "jobs:read",
-            "jobs:write",
-            "homeowner:read",
-        ],
+        "scopes_supported": list(_OAUTH_SCOPES_SUPPORTED),
         "code_challenge_methods_supported": ["S256"],
     }
     if OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED:
