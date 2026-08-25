@@ -33,7 +33,7 @@ def _mcp_call(client: TestClient, name: str, arguments: dict, token: str):
     )
 
 
-def test_successful_booking_backfills_profile_and_omits_empty_location(monkeypatch):
+def test_successful_booking_backfills_profile_and_geocodes_address(monkeypatch):
     captured: dict[str, object] = {}
     monkeypatch.setattr(tools, "BOOKING_API", "https://operator.example/book")
     monkeypatch.setattr(
@@ -42,8 +42,22 @@ def test_successful_booking_backfills_profile_and_omits_empty_location(monkeypat
         "https://operator.example/profile",
     )
     monkeypatch.setattr(main, "_state_store", InMemoryStateStore())
+    monkeypatch.setattr(tools, "GEOCODING_API", "https://operator.example/geocode")
+    monkeypatch.setattr(tools, "GEOCODING_API_KEY", "test-key")
 
     async def operator_request(_client, method, url, **kwargs):
+        if url == tools.GEOCODING_API:
+            return httpx.Response(
+                200,
+                json={
+                    "results": [{
+                        "formatted_address": "2000 Mason Hill Drive, Alexandria, VA 22307, USA",
+                        "geometry": {"location": {"lat": 38.7421, "lng": -77.0672}},
+                        "address_components": [],
+                    }]
+                },
+                request=httpx.Request(method, url),
+            )
         if method == "PATCH":
             captured["profile_patch"] = kwargs["json"]
             return httpx.Response(200, json={}, request=httpx.Request(method, url))
@@ -88,7 +102,9 @@ def test_successful_booking_backfills_profile_and_omits_empty_location(monkeypat
         current_ho_profile.reset(profile_token)
 
     assert result["status"] == "created"
-    assert "resolved_location" not in result["details"]
+    assert result["details"]["resolved_location"]["lat"] == 38.7421
+    assert captured["booking_payload"]["address"]["lat"] == 38.7421
+    assert captured["booking_payload"]["address"]["lng"] == -77.0672
     assert captured["profile_patch"] == {
         "ho_name": "Alex Fontova",
         "ho_address": captured["booking_payload"]["address"],
@@ -153,6 +169,53 @@ def test_failed_confirmed_booking_sets_mcp_is_error(monkeypatch):
     assert response.status_code == 200
     assert response.json()["result"]["isError"] is True
     assert "VALIDATION_ERROR" in response.json()["result"]["content"][0]["text"]
+
+
+def test_missing_rebooking_job_sets_mcp_is_error(monkeypatch):
+    monkeypatch.setattr(main, "OAUTH_CLIENT_ID", "")
+    monkeypatch.setattr(main, "OAUTH_CLIENT_SECRET", "")
+    monkeypatch.setattr(main, "MVP_STATIC_MCP_TOKEN", "test-static-token")
+
+    async def missing_job(_args):
+        return {
+            "status": "failed",
+            "message": "Previous job not found",
+            "error_code": "JOB_NOT_FOUND",
+        }
+
+    monkeypatch.setattr(mcp_server, "book_same_pro_again", missing_job)
+    with TestClient(main.app) as client:
+        response = _mcp_call(
+            client,
+            "book_same_pro_again",
+            {"job_id": 999999, "confirm_booking": True},
+            "test-static-token",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+    assert "JOB_NOT_FOUND" in response.json()["result"]["content"][0]["text"]
+
+
+def test_homeowner_session_validation_rejects_expired_upstream_token(monkeypatch):
+    monkeypatch.setattr(
+        tools,
+        "HOMEOWNER_PROFILE_API",
+        "https://operator.example/profile",
+    )
+
+    async def unauthorized(_client, method, url, **_kwargs):
+        return httpx.Response(401, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(tools, "operator_request", unauthorized)
+    profile_token = current_ho_profile.set({"token": "expired-upstream-token"})
+    try:
+        result = asyncio.run(tools.validate_homeowner_session())
+    finally:
+        current_ho_profile.reset(profile_token)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "UPSTREAM_SESSION_EXPIRED"
 
 
 def test_numeric_rebooking_id_and_cancel_tool_are_exposed(monkeypatch):

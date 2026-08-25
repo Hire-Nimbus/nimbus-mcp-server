@@ -143,6 +143,77 @@ def _get_client() -> httpx.AsyncClient:
     return _tools_http_client
 
 
+async def validate_homeowner_session() -> Dict[str, Any]:
+    """Validate the live operator session before returning cached profile data."""
+    profile = current_ho_profile.get()
+    if not profile:
+        return {
+            "status": "error",
+            "error_code": "AUTH_REQUIRED",
+            "message": "No authenticated homeowner profile found. Reconnect the account.",
+        }
+    upstream_token = str(
+        profile.get("token")
+        or profile.get("ho_token")
+        or profile.get("access_token")
+        or ""
+    ).strip()
+    if not upstream_token:
+        return {
+            "status": "error",
+            "error_code": "UPSTREAM_SESSION_EXPIRED",
+            "message": "The homeowner connection expired. Reconnect the account.",
+        }
+    try:
+        response = await operator_request(
+            _get_client(),
+            "GET",
+            HOMEOWNER_PROFILE_API,
+            allowed_hosts=_ALLOWED_API_HOSTS,
+            endpoint_name="ho:profile_validate",
+            rate_limit=TOOL_RATE_LIMIT_RPM,
+            headers={"Authorization": f"Bearer {upstream_token}"},
+            timeout=8,
+        )
+        if response.status_code in {401, 403}:
+            return {
+                "status": "error",
+                "error_code": "UPSTREAM_SESSION_EXPIRED",
+                "message": "The homeowner connection expired. Reconnect the account.",
+            }
+        response.raise_for_status()
+        live = response.json() or {}
+    except Exception as exc:
+        logger.warning("Homeowner session validation failed: %s", type(exc).__name__)
+        return {
+            "status": "error",
+            "error_code": "UPSTREAM_SESSION_UNAVAILABLE",
+            "message": "Could not validate the homeowner connection. Try again shortly.",
+        }
+
+    refreshed = dict(profile)
+    live_name = str(live.get("ho_name") or live.get("name") or "").strip()
+    live_phone = str(live.get("ho_phone") or live.get("phone") or "").strip()
+    live_address = live.get("ho_address") or live.get("address")
+    if live_name:
+        refreshed["name"] = live_name
+        refreshed["ho_name"] = live_name
+    if live_phone:
+        refreshed["phone"] = live_phone
+        refreshed["ho_phone"] = live_phone
+    if isinstance(live_address, dict) and live_address:
+        refreshed["address"] = dict(live_address)
+        refreshed["ho_address"] = dict(live_address)
+    current_ho_profile.set(refreshed)
+
+    session_id = current_ho_session_id.get() or ""
+    if session_id:
+        from src.main import _replace_ho_session
+
+        await _replace_ho_session(session_id, refreshed)
+    return {"status": "ok"}
+
+
 _GEOCODING_COMPONENTS = {
     "street_number": "street_number",
     "route": "route",
@@ -174,13 +245,19 @@ async def _geocode_address(address_text: str) -> Optional[Dict[str, Any]]:
         results = payload.get("results") or []
         if not results:
             return None
+        first_result = results[0]
         enriched: Dict[str, Any] = {}
-        for component in results[0].get("address_components") or []:
+        for component in first_result.get("address_components") or []:
             for component_type in component.get("types") or []:
                 field = _GEOCODING_COMPONENTS.get(component_type)
                 if field and not enriched.get(field):
                     enriched[field] = component.get("short_name") or component.get("long_name") or ""
-        formatted = results[0].get("formatted_address")
+        geometry = first_result.get("geometry") or {}
+        coordinates = geometry.get("location") or {}
+        if coordinates.get("lat") is not None and coordinates.get("lng") is not None:
+            enriched["lat"] = float(coordinates["lat"])
+            enriched["lng"] = float(coordinates["lng"])
+        formatted = first_result.get("formatted_address")
         if formatted:
             enriched["formattedAddress"] = formatted
         return enriched or None
@@ -1149,8 +1226,8 @@ def _build_address_from_inputs(
     if not formatted:
         formatted = "Unknown location"
 
-    lat = resolved_location.get("lat")
-    lng = resolved_location.get("lng")
+    lat = resolved_location.get("lat", address.get("lat"))
+    lng = resolved_location.get("lng", address.get("lng"))
 
     result = {
         "lat": float(lat) if lat is not None else None,
@@ -1388,6 +1465,42 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
     normalized_address = validated_address or (
         _normalize_address_fields(address_raw) if address_raw else None
     )
+    if not (
+        resolved_location
+        and resolved_location.get("lat") is not None
+        and resolved_location.get("lng") is not None
+    ):
+        address_text = _format_full_address(normalized_address or {})
+        geocoded = await _geocode_address(address_text)
+        if geocoded:
+            resolved_location = dict(geocoded)
+            for key in ("city", "region", "postalCode", "country", "formattedAddress"):
+                if geocoded.get(key) and not (normalized_address or {}).get(key):
+                    if normalized_address is None:
+                        normalized_address = {}
+                    normalized_address[key] = geocoded[key]
+
+    if not (
+        resolved_location
+        and resolved_location.get("lat") is not None
+        and resolved_location.get("lng") is not None
+    ):
+        postal_code = str((normalized_address or {}).get("postalCode") or "").strip()
+        if postal_code:
+            resolved_location = await _resolve_location({"zip": postal_code})
+
+    if not (
+        resolved_location
+        and "error" not in resolved_location
+        and resolved_location.get("lat") is not None
+        and resolved_location.get("lng") is not None
+    ):
+        return {
+            "status": "failed",
+            "message": "The booking address could not be geocoded. Check the full street address and try again.",
+            "error_code": "LOCATION_RESOLUTION_FAILED",
+            "details": {"resolved_location": resolved_location or {}},
+        }
     address_payload = _build_address_from_inputs(normalized_address, resolved_location)
 
     idempotency_state_key = ""
