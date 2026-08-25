@@ -1,11 +1,13 @@
 # src/mcp_server.py
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Annotated, Any, Dict, Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import APP_LINK, BRAND_NAME, MCP_SERVER_NAME, SITE_BASE_URL
@@ -20,6 +22,7 @@ from src.tools import (
     get_previous_jobs,
     get_booking_status,
     book_same_pro_again,
+    cancel_booking,
 )
 from src.monitor import install_tool_monitor
 
@@ -219,6 +222,7 @@ def _search_location_from_address(address: Dict[str, Any]) -> Optional[str]:
 
 _AUTH_REQUIRED_RESULT = {
     "status": "auth_required",
+    "error_code": "AUTH_REQUIRED",
     "message": (
         f"This action requires a connected {BRAND_NAME} account. "
         "Searching and browsing providers works without an account. "
@@ -232,6 +236,18 @@ def _require_auth() -> Dict[str, Any] | None:
     """Return a stable tool result when a protected capability lacks identity."""
 
     return None if current_is_authenticated.get() else dict(_AUTH_REQUIRED_RESULT)
+
+
+def _raise_tool_error(result: Dict[str, Any]) -> None:
+    """Preserve the structured error payload while setting MCP isError=true."""
+
+    raise ToolError(json.dumps(result, default=str))
+
+
+def _raise_if_write_failed(result: Dict[str, Any]) -> Dict[str, Any]:
+    if result.get("status") in {"failed", "error", "auth_required"} or result.get("error"):
+        _raise_tool_error(result)
+    return result
 
 
 SearchLocation = Annotated[
@@ -677,8 +693,8 @@ async def create_booking_mcp(
 
     MCP hints: readOnlyHint=false (creates a booking when confirm_booking=true); destructiveHint=false (not an MCP-style irreversible delete); openWorldHint=true; idempotentHint=false unless the same idempotency_key is reused."""
     if (denied := _require_auth()) is not None:
-        return denied
-    return await _create_booking_impl(
+        _raise_tool_error(denied)
+    result = await _create_booking_impl(
         serviceProviderSlug=serviceProviderSlug,
         job_description=job_description,
         name=name,
@@ -689,6 +705,7 @@ async def create_booking_mcp(
         confirm_booking=confirm_booking,
         idempotency_key=idempotency_key,
     )
+    return _raise_if_write_failed(result)
 
 
 async def _create_booking_impl(
@@ -873,7 +890,7 @@ async def get_booking_status_mcp(booking_id: str) -> Dict[str, Any]:
 )
 async def book_same_pro_again_mcp(
     job_id: Annotated[
-        str,
+        str | int,
         Field(description="Job ID from get_previous_jobs for the prior booking to rehire"),
     ],
     job_description: Annotated[
@@ -932,33 +949,59 @@ async def book_same_pro_again_mcp(
 
     MCP hints: readOnlyHint=false (submits a rehire/booking request); destructiveHint=false; openWorldHint=true (live booking API)."""
     if (denied := _require_auth()) is not None:
-        return denied
+        _raise_tool_error(denied)
+
+    job_id_text = str(job_id).strip()
 
     if not confirm_booking:
         jobs_result = await get_previous_jobs()
         if isinstance(jobs_result, dict) and jobs_result.get("error"):
-            return jobs_result
+            _raise_tool_error(jobs_result)
         match = next(
-            (job for job in jobs_result.get("jobs", []) if str(job.get("id") or "") == job_id),
+            (
+                job
+                for job in jobs_result.get("jobs", [])
+                if str(job.get("id") or "").strip() == job_id_text
+            ),
             None,
         )
         if not match:
-            return {"status": "error", "code": "JOB_NOT_FOUND", "message": "Previous job not found."}
+            _raise_tool_error(
+                {
+                    "status": "error",
+                    "error_code": "JOB_NOT_FOUND",
+                    "message": "Previous job not found.",
+                }
+            )
         provider = match.get("service_provider") or {}
+        profile = current_ho_profile.get() or {}
+        profile_name = str(profile.get("name") or profile.get("ho_name") or "").strip()
+        profile_phone = str(profile.get("phone") or profile.get("ho_phone") or "").strip()
+        profile_address = _normalize_address(profile.get("address") or profile.get("ho_address"))
+        source_name = str(match.get("name") or match.get("ho_name") or "").strip()
+        source_phone = str(match.get("phone") or match.get("ho_phone") or "").strip()
+        source_address = _normalize_address(match.get("address"))
         return {
             "status": "preview",
             "message": "Rebooking preview ready. Call again with confirm_booking=true after approval.",
             "booking_summary": {
-                "job_id": job_id,
+                "job_id": job_id_text,
                 "provider_slug": provider.get("slug"),
                 "provider_name": provider.get("full_name") or provider.get("name") or "Provider",
                 "job_description": job_description or match.get("job_description"),
+                "homeowner_name": name or profile_name or source_name,
+                "homeowner_phone": phone or profile_phone or source_phone,
+                "address": (
+                    _normalize_address(address.model_dump(exclude_none=True))
+                    if address
+                    else profile_address or source_address
+                ),
             },
             "required_action": "Set confirm_booking=true after the user confirms.",
         }
 
     args: Dict[str, Any] = {
-        "job_id": job_id,
+        "job_id": job_id_text,
         "source": source,
     }
     if job_description is not None:
@@ -976,7 +1019,7 @@ async def book_same_pro_again_mcp(
 
     result = await book_same_pro_again(args)
     if isinstance(result, dict) and "error" in result:
-        return result
+        _raise_tool_error(result)
     if isinstance(result, dict) and result.get("status") == "created" and "error_code" not in result:
         return {
             **result,
@@ -986,7 +1029,73 @@ async def book_same_pro_again_mcp(
             },
             "_meta": {"ui": {"resourceUri": "ui://booking_confirmation/app"}},
         }
-    return result
+    return _raise_if_write_failed(result)
+
+
+@mcp.tool(
+    name="cancel_booking",
+    annotations={
+        "title": "Cancel booking",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def cancel_booking_mcp(
+    job_id: Annotated[str | int, Field(description="Booking ID from get_previous_jobs")],
+    reason: Annotated[
+        str,
+        Field(description="Short homeowner-provided cancellation reason", min_length=3),
+    ],
+    confirm_cancellation: Annotated[
+        bool,
+        Field(
+            description=(
+                "false (default): preview without changing the booking; true: cancel only "
+                "after the homeowner explicitly confirms"
+            )
+        ),
+    ] = False,
+) -> Dict[str, Any]:
+    """Preview, then cancel, one of the authenticated homeowner's bookings."""
+
+    if (denied := _require_auth()) is not None:
+        _raise_tool_error(denied)
+    job_id_text = str(job_id).strip()
+    jobs_result = await get_previous_jobs()
+    if isinstance(jobs_result, dict) and jobs_result.get("error"):
+        _raise_tool_error(jobs_result)
+    match = next(
+        (
+            job
+            for job in jobs_result.get("jobs") or []
+            if str(job.get("id") or "").strip() == job_id_text
+        ),
+        None,
+    )
+    if not match:
+        _raise_tool_error(
+            {
+                "status": "failed",
+                "message": "Booking not found for this homeowner.",
+                "error_code": "BOOKING_NOT_FOUND",
+            }
+        )
+    if not confirm_cancellation:
+        return {
+            "status": "confirmation_required",
+            "message": "Cancellation not submitted. Ask the homeowner to confirm this summary.",
+            "cancellation_summary": {
+                "job_id": job_id_text,
+                "provider": match.get("service_provider"),
+                "job_description": match.get("job_description"),
+                "reason": reason,
+            },
+            "required_action": "Set confirm_cancellation=true after explicit approval.",
+        }
+    result = await cancel_booking({"job_id": job_id_text, "reason": reason})
+    return _raise_if_write_failed(result)
 
 
 def _make_find_service_handler(service_query: str):

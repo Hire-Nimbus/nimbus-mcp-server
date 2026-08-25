@@ -88,6 +88,10 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional operator-owned notification endpoint.
+  CancelBookingApi:
+    Type: String
+    Default: ""
+    Description: Optional authenticated booking-cancellation endpoint.
   MonitorSlackApi:
     Type: String
     Default: ""
@@ -154,6 +158,7 @@ Resources:
           HOMEOWNER_PROFILE_API: !Ref HomeownerProfileApi
           SEND_BOOK_NOTIFICATION_API: !Ref SendBookNotificationApi
           SEND_JOB_TO_SLACK_API: !Ref SendJobToSlackApi
+          CANCEL_BOOKING_API: !Ref CancelBookingApi
           MCP_MONITOR_SLACK_API: !Ref MonitorSlackApi
           MCP_MONITOR_ENABLED: "false"
           UPSTREAM_MCP_URL: !Ref UpstreamMcpUrl

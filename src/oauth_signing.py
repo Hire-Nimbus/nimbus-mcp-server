@@ -18,6 +18,7 @@ _P256_ORDER = int(
     16,
 )
 _SIGNING_CONTEXT = b"nimbus-mcp/access-token-signing/v1"
+_REFRESH_SIGNING_CONTEXT = b"nimbus-mcp/refresh-token-signing/v1"
 
 # OAUTH_CLIENT_SECRET is operator-managed and must be high entropy (at least
 # 32 random bytes). HKDF domain separation keeps the ES256 key distinct from
@@ -30,20 +31,28 @@ def _base64url(value: bytes) -> str:
 
 
 @lru_cache(maxsize=8)
-def _signing_material(
+def _derived_private_key(
     oauth_secret: str,
-) -> tuple[ec.EllipticCurvePrivateKey, dict[str, str]]:
+    context: bytes,
+) -> ec.EllipticCurvePrivateKey:
     if not oauth_secret:
-        raise RuntimeError("OAuth access-token signing requires OAUTH_CLIENT_SECRET")
+        raise RuntimeError("OAuth token signing requires OAUTH_CLIENT_SECRET")
 
     derived = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=_SIGNING_CONTEXT,
+        info=context,
     ).derive(oauth_secret.encode("utf-8"))
     private_value = (int.from_bytes(derived, "big") % (_P256_ORDER - 1)) + 1
-    private_key = ec.derive_private_key(private_value, ec.SECP256R1())
+    return ec.derive_private_key(private_value, ec.SECP256R1())
+
+
+@lru_cache(maxsize=8)
+def _signing_material(
+    oauth_secret: str,
+) -> tuple[ec.EllipticCurvePrivateKey, dict[str, str]]:
+    private_key = _derived_private_key(oauth_secret, _SIGNING_CONTEXT)
     public_numbers = private_key.public_key().public_numbers()
     x = _base64url(public_numbers.x.to_bytes(32, "big"))
     y = _base64url(public_numbers.y.to_bytes(32, "big"))
@@ -98,4 +107,28 @@ def decode_access_token(
         algorithms=["ES256"],
         options={"require": ["exp", "sub"]},
         audience=audience,
+    )
+
+
+def encode_refresh_token(claims: dict[str, Any], oauth_secret: str) -> str:
+    """Sign refresh-token state with a purpose-separated ES256 key."""
+
+    private_key = _derived_private_key(oauth_secret, _REFRESH_SIGNING_CONTEXT)
+    return jwt.encode(
+        claims,
+        private_key,
+        algorithm="ES256",
+        headers={"typ": "refresh+jwt"},
+    )
+
+
+def decode_refresh_token(token: str, oauth_secret: str) -> dict[str, Any]:
+    """Verify an ES256 refresh token."""
+
+    private_key = _derived_private_key(oauth_secret, _REFRESH_SIGNING_CONTEXT)
+    return jwt.decode(
+        token,
+        private_key.public_key(),
+        algorithms=["ES256"],
+        options={"require": ["exp", "jti", "type"]},
     )

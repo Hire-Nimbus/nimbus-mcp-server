@@ -80,6 +80,7 @@ SERVICE_REQUESTS_METADATA_URL = _env("SERVICE_REQUESTS_METADATA_URL")
 REVIEWS_API = _env("REVIEWS_API")
 SEND_BOOK_NOTIFICATION_API = _env("SEND_BOOK_NOTIFICATION_API")
 SEND_JOB_TO_SLACK_API = _env("SEND_JOB_TO_SLACK_API")
+CANCEL_BOOKING_API = _env("CANCEL_BOOKING_API")
 
 # Optional monitoring is off by default and never points at a default webhook.
 MCP_MONITOR_ENABLED = _bool_env("MCP_MONITOR_ENABLED", False)
@@ -155,6 +156,7 @@ def configured_external_api_urls() -> list[str]:
         REVIEWS_API,
         SEND_BOOK_NOTIFICATION_API,
         SEND_JOB_TO_SLACK_API,
+        CANCEL_BOOKING_API,
         MCP_MONITOR_SLACK_API,
         PROFILE_LOOKUP_API,
         AUTH_WEBHOOK_URL,

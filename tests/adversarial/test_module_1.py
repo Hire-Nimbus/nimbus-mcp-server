@@ -7,6 +7,7 @@ import asyncio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.fastmcp.exceptions import ToolError
 
 from src import config, main
 from src.adapters import HttpOperatorRequestAdapter
@@ -75,13 +76,13 @@ def test_protected_tools_fail_closed_without_auth():
     token = current_is_authenticated.set(False)
     try:
         profile = asyncio.run(get_my_profile_mcp())
-        booking = asyncio.run(create_booking_mcp("provider", "repair a leak"))
+        with pytest.raises(ToolError, match="AUTH_REQUIRED"):
+            asyncio.run(create_booking_mcp("provider", "repair a leak"))
     finally:
         current_is_authenticated.reset(token)
 
     assert profile.status == "error"
     assert "connected" in (profile.message or "").lower()
-    assert booking["status"] == "auth_required"
 
 
 def test_http_adapter_rejects_unconfigured_integration():
