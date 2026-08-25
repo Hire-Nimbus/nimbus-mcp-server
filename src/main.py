@@ -414,13 +414,21 @@ async def _resolve_dynamic_client(client_id: str) -> dict[str, Any] | None:
     return await _get_state_store().get(f"client:{client_id}")
 
 
-async def _store_ho_session(profile: dict[str, Any], upstream_token: str) -> str:
+async def _store_ho_session(
+    profile: dict[str, Any],
+    upstream_token: str,
+    upstream_refresh_token: str = "",
+) -> str:
     """Persist profile context server-side; encrypt the operator bearer token."""
 
     session_id = secrets.token_urlsafe(32)
     safe_profile = _trim_profile(profile)
     if upstream_token:
         safe_profile["enc_ho_token"] = _encrypt_token(upstream_token)
+    if upstream_refresh_token:
+        safe_profile["enc_upstream_refresh_token"] = _encrypt_token(
+            upstream_refresh_token
+        )
     await _get_state_store().put(
         f"session:{session_id}",
         safe_profile,
@@ -443,7 +451,130 @@ async def _resolve_ho_session(session_id: str) -> dict[str, Any] | None:
             profile["token"] = _decrypt_token(str(encrypted))
         except (InvalidToken, ValueError, TypeError):
             logger.warning("Unable to decrypt homeowner session token")
+    encrypted_refresh = profile.pop("enc_upstream_refresh_token", None)
+    if encrypted_refresh:
+        try:
+            profile["upstream_refresh_token"] = _decrypt_token(
+                str(encrypted_refresh)
+            )
+        except (InvalidToken, ValueError, TypeError):
+            logger.warning("Unable to decrypt homeowner session refresh token")
     return profile
+
+
+async def _replace_ho_session(
+    session_id: str,
+    profile: dict[str, Any],
+) -> None:
+    """Persist rotated upstream credentials behind the existing opaque id."""
+    safe_profile = _trim_profile(profile)
+    upstream_token = str(
+        profile.get("token")
+        or profile.get("ho_token")
+        or profile.get("access_token")
+        or ""
+    ).strip()
+    upstream_refresh_token = str(
+        profile.get("upstream_refresh_token") or ""
+    ).strip()
+    if upstream_token:
+        safe_profile["enc_ho_token"] = _encrypt_token(upstream_token)
+    if upstream_refresh_token:
+        safe_profile["enc_upstream_refresh_token"] = _encrypt_token(
+            upstream_refresh_token
+        )
+    await _get_state_store().put(
+        f"session:{session_id}",
+        safe_profile,
+        int(time.time()) + REFRESH_TOKEN_TTL,
+    )
+
+
+def _upstream_access_expiration(profile: dict[str, Any] | None) -> float | None:
+    profile = profile or {}
+    token = str(
+        profile.get("token")
+        or profile.get("ho_token")
+        or profile.get("access_token")
+        or ""
+    ).strip()
+    if not token:
+        return None
+    try:
+        claims = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_exp": False},
+        )
+        expiration = float(claims.get("exp"))
+        return expiration if expiration > 0 else None
+    except (jwt.InvalidTokenError, TypeError, ValueError):
+        return None
+
+
+async def _oauth_access_expiration(
+    now: float,
+    ho_session: str,
+) -> tuple[float, int]:
+    expiration = now + OAUTH_TOKEN_TTL
+    if ho_session:
+        upstream_expiration = _upstream_access_expiration(
+            await _resolve_ho_session(ho_session)
+        )
+        if upstream_expiration is not None:
+            expiration = min(expiration, upstream_expiration)
+    return expiration, max(1, int(expiration - now))
+
+
+class UpstreamSessionRefreshError(RuntimeError):
+    """The operator homeowner session requires a new OAuth login."""
+
+
+async def _refresh_upstream_ho_session(session_id: str) -> dict[str, Any]:
+    profile = await _resolve_ho_session(session_id)
+    if not profile:
+        raise UpstreamSessionRefreshError(
+            "The homeowner connection expired. Reconnect the account."
+        )
+    refresh_token = str(profile.get("upstream_refresh_token") or "").strip()
+    if not refresh_token:
+        current_expiration = _upstream_access_expiration(profile)
+        if current_expiration and current_expiration > time.time():
+            return profile
+        raise UpstreamSessionRefreshError(
+            "This connection predates renewable sessions. Reconnect the account once."
+        )
+
+    try:
+        response = await operator_request(
+            _get_http_client(),
+            "POST",
+            AUTH_WEBHOOK_URL,
+            allowed_hosts=_ALLOWED_API_HOSTS,
+            endpoint_name="auth:session_refresh",
+            rate_limit=30,
+            json={"refresh_token": refresh_token},
+            timeout=8,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+    except Exception as exc:
+        logger.warning("Upstream homeowner session refresh failed: %s", type(exc).__name__)
+        raise UpstreamSessionRefreshError(
+            "The homeowner connection could not be refreshed. Reconnect the account."
+        ) from exc
+
+    access_token = str(payload.get("access_token") or "").strip()
+    rotated_refresh = str(payload.get("refresh_token") or "").strip()
+    if not access_token or not rotated_refresh:
+        raise UpstreamSessionRefreshError(
+            "The homeowner connection returned incomplete credentials. Reconnect the account."
+        )
+
+    refreshed_profile = dict(profile)
+    refreshed_profile["token"] = access_token
+    refreshed_profile["upstream_refresh_token"] = rotated_refresh
+    await _replace_ho_session(session_id, refreshed_profile)
+    return refreshed_profile
 
 
 async def _backfill_ho_session_profile(
@@ -1016,6 +1147,7 @@ async def authorize_endpoint(request: Request):
     # Step 2: handle POST actions
     ho_profile: dict | None = None
     upstream_access_token = ""
+    upstream_refresh_token = ""
     response_status = 200
     if request.method == "POST":
         if step == "send_code":
@@ -1074,12 +1206,21 @@ async def authorize_endpoint(request: Request):
                     r.raise_for_status()
                     auth_payload = r.json() or {}
                     access_token = auth_payload.get("access_token")
+                    upstream_refresh_token = str(
+                        auth_payload.get("refresh_token") or ""
+                    ).strip()
                     if not access_token:
                         logger.error(
                             "Auth webhook returned no access_token for %s",
                             mask_phone(normalized_phone),
                         )
                         raise RuntimeError("access_token missing from auth webhook response")
+                    if not upstream_refresh_token:
+                        logger.error(
+                            "Auth webhook returned no refresh_token for %s",
+                            mask_phone(normalized_phone),
+                        )
+                        raise RuntimeError("refresh_token missing from auth webhook response")
 
                     logger.info("OTP verified for %s, fetching profile", mask_phone(normalized_phone))
                     upstream_access_token = str(access_token)
@@ -1119,7 +1260,11 @@ async def authorize_endpoint(request: Request):
                     step = "code"
 
             if ho_profile is not None and not error:
-                ho_session = await _store_ho_session(ho_profile, upstream_access_token)
+                ho_session = await _store_ho_session(
+                    ho_profile,
+                    upstream_access_token,
+                    upstream_refresh_token,
+                )
                 code = await _store_auth_grant({
                     "client_id": client_id,
                     "redirect_uri": redirect_uri,
@@ -1462,7 +1607,6 @@ async def token_endpoint(request: Request):
             "scope": scope,
             "aud": resource,
             "iat": now,
-            "exp": now + OAUTH_TOKEN_TTL,
         }
         ai_service = _known_ai_service(stored.get("ai_service"))
         if ai_service:
@@ -1472,6 +1616,11 @@ async def token_endpoint(request: Request):
         ho_session = str(stored.get("ho_session") or "")
         if not ho_session and ho_profile:
             ho_session = await _store_ho_session(ho_profile, "")
+        access_expiration, access_expires_in = await _oauth_access_expiration(
+            now,
+            ho_session,
+        )
+        claims["exp"] = access_expiration
         if ho_session:
             claims["ho_session"] = ho_session
 
@@ -1501,7 +1650,7 @@ async def token_endpoint(request: Request):
         return {
             "access_token": access_token,
             "token_type": "Bearer",
-            "expires_in": OAUTH_TOKEN_TTL,
+            "expires_in": access_expires_in,
             "refresh_token": refresh_token,
             "scope": scope,
             "resource": resource,
@@ -1547,13 +1696,30 @@ async def token_endpoint(request: Request):
             # profile data instead of an opaque durable session id.
             ho_session = await _store_ho_session(ho_profile, "")
 
+        if ho_session:
+            try:
+                await _refresh_upstream_ho_session(ho_session)
+            except UpstreamSessionRefreshError as exc:
+                return JSONResponse(
+                    {
+                        "error": "invalid_grant",
+                        "error_code": "reauthentication_required",
+                        "error_description": str(exc),
+                    },
+                    status_code=400,
+                )
+
         claims: dict[str, Any] = {
             "sub": client_id,
             "scope": scope,
             "aud": resource,
             "iat": now,
-            "exp": now + OAUTH_TOKEN_TTL,
         }
+        access_expiration, access_expires_in = await _oauth_access_expiration(
+            now,
+            ho_session,
+        )
+        claims["exp"] = access_expiration
         ai_service = _known_ai_service(stored_rt.get("ai_service"))
         if ai_service:
             claims["ai_service"] = ai_service
@@ -1573,7 +1739,7 @@ async def token_endpoint(request: Request):
         return {
             "access_token": access_token,
             "token_type": "Bearer",
-            "expires_in": OAUTH_TOKEN_TTL,
+            "expires_in": access_expires_in,
             "refresh_token": new_refresh_token,
             "scope": scope,
             "resource": resource,

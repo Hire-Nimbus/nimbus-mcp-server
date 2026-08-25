@@ -407,7 +407,7 @@ def test_new_tokens_keep_homeowner_pii_in_opaque_server_session(monkeypatch):
     assert jwt.get_unverified_header(response.json()["refresh_token"])["alg"] == "ES256"
 
 
-def test_legacy_hs256_refresh_token_rotates_to_es256(monkeypatch):
+def test_legacy_hs256_refresh_without_upstream_session_requires_reconnect(monkeypatch):
     _configure_oauth(monkeypatch)
     now = main.time.time()
     legacy_refresh = jwt.encode(
@@ -442,12 +442,63 @@ def test_legacy_hs256_refresh_token_rotates_to_es256(monkeypatch):
         },
     )
 
-    assert response.status_code == 200
-    assert jwt.get_unverified_header(response.json()["refresh_token"])["alg"] == "ES256"
-    assert "ho_profile" not in jwt.decode(
-        response.json()["access_token"],
-        options={"verify_signature": False},
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_grant"
+    assert response.json()["error_code"] == "reauthentication_required"
+
+
+def test_refresh_rotates_operator_homeowner_session(monkeypatch):
+    _configure_oauth(monkeypatch)
+    now = int(main.time.time())
+    upstream_access = jwt.encode(
+        {"sub": "homeowner", "exp": now + 7200},
+        "upstream-test-secret-that-is-long-enough",
+        algorithm="HS256",
     )
+    session_id = asyncio.run(
+        main._store_ho_session(
+            {"ho_name": "Alex Fontova"},
+            "expired-upstream-access",
+            "upstream-refresh-before-rotation",
+        )
+    )
+    refresh_token = asyncio.run(
+        main._issue_refresh_token({
+            "client_id": "legacy-shared-client",
+            "scope": "mcp offline_access",
+            "ho_session": session_id,
+            "resource": "https://mcp.example.com/mcp",
+        })
+    )
+
+    async def refresh_upstream(_client, method, url, **kwargs):
+        assert kwargs["json"] == {
+            "refresh_token": "upstream-refresh-before-rotation"
+        }
+        return httpx.Response(
+            200,
+            json={
+                "access_token": upstream_access,
+                "refresh_token": "upstream-refresh-after-rotation",
+            },
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(main, "operator_request", refresh_upstream)
+    response = TestClient(main.app).post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": "legacy-shared-client",
+            "refresh_token": refresh_token,
+        },
+    )
+
+    assert response.status_code == 200
+    refreshed = asyncio.run(main._resolve_ho_session(session_id))
+    assert refreshed["token"] == upstream_access
+    assert refreshed["upstream_refresh_token"] == "upstream-refresh-after-rotation"
+    assert response.json()["expires_in"] <= 7200
 
 
 def test_bad_otp_returns_json_400_for_non_browser_client(monkeypatch):

@@ -23,6 +23,7 @@ from src.tools import (
     get_booking_status,
     book_same_pro_again,
     cancel_booking,
+    validate_homeowner_session,
 )
 from src.monitor import install_tool_monitor
 
@@ -494,6 +495,15 @@ async def get_my_profile_mcp() -> GetMyProfileResult:
     """Return authenticated homeowner profile (see tool description for GetMyProfileResult fields)."""
     if (denied := _require_auth()) is not None:
         return GetMyProfileResult(status="error", message=denied["message"])
+    session_status = await validate_homeowner_session()
+    if session_status.get("status") != "ok":
+        return GetMyProfileResult(
+            status="error",
+            message=str(
+                session_status.get("message")
+                or "Could not validate the homeowner connection."
+            ),
+        )
     profile = current_ho_profile.get()
     if not profile:
         return GetMyProfileResult(
