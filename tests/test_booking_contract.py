@@ -9,7 +9,6 @@ from src import main, mcp_server, tools
 from src.auth_context import (
     current_ho_profile,
     current_ho_session_id,
-    current_is_authenticated,
 )
 from src.state import InMemoryStateStore
 
