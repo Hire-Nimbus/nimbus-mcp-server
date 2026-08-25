@@ -22,6 +22,8 @@ from src.config import (
     SITE_BASE_URL,
     SEND_BOOK_NOTIFICATION_API,
     SEND_JOB_TO_SLACK_API,
+    CANCEL_BOOKING_API,
+    HOMEOWNER_PROFILE_API,
     PROFILE_LOOKUP_API,
     PROFILE_LOOKUP_METHOD,
     SEARCH_PROVIDERS_FETCH_COUNT,
@@ -39,6 +41,7 @@ from src.auth_context import (
     current_actor_id,
     current_ai_service,
     current_ho_profile,
+    current_ho_session_id,
 )
 from src.adapters import operator_request
 from src.security import (
@@ -1464,6 +1467,11 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
             # persistence of the replay marker failed.
             logger.error("Booking created but idempotency result could not be persisted")
 
+        profile_backfill_status = await _backfill_homeowner_profile(
+            name=name,
+            address=address_payload,
+        )
+
         full_address = _format_full_address(address_payload)
         display_phone = _format_display_phone(phone)
 
@@ -1529,7 +1537,6 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
             logger.warning("Provider notification failed for %s: %s", service_provider_slug, e)
 
         details = {
-            "resolved_location": resolved_location or {},
             "notifications": {
                 "slack": slack_status,
                 "slack_thread_ts": slack_thread_ts_status,
@@ -1561,6 +1568,10 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
                 "fallback_support": "Contact the operator through the configured support channel if anything gets stuck.",
             },
         }
+        if resolved_location is not None:
+            details["resolved_location"] = resolved_location
+        if profile_backfill_status != "not_needed":
+            details["profile_backfill"] = profile_backfill_status
         return {
             "status": "created",
             "message": "Booking created; notification delivery is reported in details",
@@ -1595,11 +1606,15 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
                 "message": "Booking created, but some notifications failed",
                 "details": {
                     "error_code": "NOTIFICATION_ERROR",
-                    "resolved_location": resolved_location or {},
                     "notifications": {
                         "slack": "attempted",
                         "sms_homeowner": "failed_or_skipped",
                     },
+                    **(
+                        {"resolved_location": resolved_location}
+                        if resolved_location is not None
+                        else {}
+                    ),
                 },
             }
 
@@ -1607,8 +1622,74 @@ async def create_booking(args: Dict[str, Any]) -> BookingResult:
             "status": "failed",
             "message": "Booking failed",
             "error_code": "INTERNAL_ERROR",
-            "details": {"error_type": error_type, "resolved_location": resolved_location or {}},
+            "details": {
+                "error_type": error_type,
+                **(
+                    {"resolved_location": resolved_location}
+                    if resolved_location is not None
+                    else {}
+                ),
+            },
         }
+
+
+async def _backfill_homeowner_profile(
+    *,
+    name: str,
+    address: Dict[str, Any],
+) -> str:
+    """Persist booking identity only where the authenticated profile is empty."""
+
+    profile = current_ho_profile.get()
+    if not profile:
+        return "not_needed"
+    update: Dict[str, Any] = {}
+    if not str(profile.get("name") or profile.get("ho_name") or "").strip():
+        update["ho_name"] = name
+    if not (profile.get("address") or profile.get("ho_address")):
+        update["ho_address"] = address
+    if not update:
+        return "not_needed"
+    if not HOMEOWNER_PROFILE_API:
+        return "skipped_not_configured"
+
+    upstream_token = str(
+        profile.get("token")
+        or profile.get("ho_token")
+        or profile.get("access_token")
+        or ""
+    ).strip()
+    if not upstream_token:
+        return "skipped_no_token"
+    try:
+        response = await operator_request(
+            _get_client(),
+            "PATCH",
+            HOMEOWNER_PROFILE_API,
+            allowed_hosts=_ALLOWED_API_HOSTS,
+            endpoint_name="profile:backfill",
+            rate_limit=TOOL_RATE_LIMIT_RPM,
+            headers={"Authorization": f"Bearer {upstream_token}"},
+            json={**update, "backfill_only": True},
+            timeout=8,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Profile backfill failed after booking: %s", type(exc).__name__)
+        return "failed"
+
+    if update.get("ho_name"):
+        profile["name"] = update["ho_name"]
+        profile["ho_name"] = update["ho_name"]
+    if update.get("ho_address"):
+        profile["address"] = dict(update["ho_address"])
+        profile["ho_address"] = dict(update["ho_address"])
+    session_id = current_ho_session_id.get() or ""
+    if session_id:
+        from src.main import _backfill_ho_session_profile
+
+        await _backfill_ho_session_profile(session_id, update)
+    return "updated"
 
 
 # -------- Previous jobs --------
@@ -1760,9 +1841,17 @@ async def book_same_pro_again(args: Dict[str, Any]) -> BookingResult:
     profile_phone = str(profile.get("phone") or profile.get("ho_phone") or "").strip()
     profile_address = _normalize_address_fields(profile.get("address") or profile.get("ho_address"))
 
-    name = str(args.get("name") or profile_name or "").strip()
-    phone = str(args.get("phone") or profile_phone or "").strip()
-    address = _normalize_address_fields(args.get("address")) if isinstance(args.get("address"), dict) else profile_address
+    source_name = str(match.get("name") or match.get("ho_name") or "").strip()
+    source_phone = str(match.get("phone") or match.get("ho_phone") or "").strip()
+    source_address = _normalize_address_fields(match.get("address"))
+
+    name = str(args.get("name") or profile_name or source_name or "").strip()
+    phone = str(args.get("phone") or profile_phone or source_phone or "").strip()
+    address = (
+        _normalize_address_fields(args.get("address"))
+        if isinstance(args.get("address"), dict)
+        else profile_address or source_address
+    )
     location = args.get("location") if isinstance(args.get("location"), dict) else None
     job_description = str(args.get("job_description") or match.get("job_description") or "").strip()
     source = str(args.get("source") or "AI Assistant").strip()
@@ -1781,3 +1870,88 @@ async def book_same_pro_again(args: Dict[str, Any]) -> BookingResult:
         create_args["location"] = location
 
     return await create_booking(create_args)
+
+
+async def cancel_booking(args: Dict[str, Any]) -> BookingResult:
+    """Cancel a booking owned by the authenticated homeowner."""
+
+    job_id = str(args.get("job_id") or "").strip()
+    reason = str(args.get("reason") or "").strip()
+    if not job_id:
+        return {"status": "failed", "message": "job_id is required", "error_code": "VALIDATION_ERROR"}
+    if len(reason) < 3:
+        return {"status": "failed", "message": "reason is required", "error_code": "VALIDATION_ERROR"}
+    if not CANCEL_BOOKING_API:
+        return {
+            "status": "failed",
+            "message": "Cancellation endpoint is not configured",
+            "error_code": "CONFIGURATION_ERROR",
+        }
+
+    payload = await _load_homeowner_jobs_raw()
+    jobs = payload.get("data") or []
+    match = next(
+        (job for job in jobs if str(job.get("id") or "").strip() == job_id),
+        None,
+    )
+    if not match:
+        return {"status": "failed", "message": "Booking not found", "error_code": "BOOKING_NOT_FOUND"}
+    if match.get("is_canceled") is True:
+        return {
+            "status": "cancelled",
+            "message": "Booking was already cancelled",
+            "job_id": job_id,
+            "reason": reason,
+        }
+
+    profile = current_ho_profile.get() or {}
+    upstream_token = str(
+        profile.get("token")
+        or profile.get("ho_token")
+        or profile.get("access_token")
+        or ""
+    ).strip()
+    if not upstream_token:
+        return {"status": "failed", "message": "Homeowner session is unavailable", "error_code": "AUTH_REQUIRED"}
+    try:
+        response = await operator_request(
+            _get_client(),
+            "POST",
+            CANCEL_BOOKING_API,
+            allowed_hosts=_ALLOWED_API_HOSTS,
+            endpoint_name="booking:cancel",
+            rate_limit=BOOKING_RATE_LIMIT_RPM,
+            headers={"Authorization": f"Bearer {upstream_token}"},
+            json={"service_request_id": job_id, "reason": reason},
+            timeout=20,
+        )
+        response.raise_for_status()
+        response_payload = response.json() or {}
+    except httpx.HTTPStatusError as exc:
+        code = "BOOKING_NOT_FOUND" if exc.response.status_code == 404 else "CANCELLATION_FAILED"
+        return {"status": "failed", "message": "Booking cancellation failed", "error_code": code}
+    except Exception as exc:
+        logger.warning("Booking cancellation failed for %s: %s", job_id, type(exc).__name__)
+        return {"status": "failed", "message": "Booking cancellation failed", "error_code": "CANCELLATION_FAILED"}
+
+    notifications = (
+        response_payload.get("notifications")
+        if isinstance(response_payload, dict)
+        else None
+    )
+    provider_delivery = (
+        notifications.get("provider_push")
+        if isinstance(notifications, dict)
+        else None
+    )
+    return {
+        "status": "cancelled",
+        "message": (
+            "Booking cancelled and the provider was notified"
+            if provider_delivery == "sent"
+            else "Booking cancelled; provider notification delivery is shown in details"
+        ),
+        "job_id": job_id,
+        "reason": reason,
+        "notifications": notifications or {},
+    }

@@ -7,6 +7,7 @@ import base64
 import hashlib
 
 import jwt
+import httpx
 from fastapi.testclient import TestClient
 
 from src import main
@@ -342,3 +343,162 @@ def test_unregistered_localhost_pkce_client_cannot_claim_grok_bot(monkeypatch):
         options={"verify_signature": False},
     )
     assert "ai_service" not in claims
+
+
+def test_new_tokens_keep_homeowner_pii_in_opaque_server_session(monkeypatch):
+    _configure_oauth(monkeypatch)
+    verifier = "v" * 43
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+    profile = {
+        "ho_name": "Alex Fontova",
+        "ho_address": {"address1": "2000 Mason Hill Drive"},
+        "phone": "+15551234567",
+    }
+    session_id = asyncio.run(main._store_ho_session(profile, "upstream-token"))
+    code = asyncio.run(
+        main._store_auth_grant(
+            {
+                "client_id": "legacy-shared-client",
+                "redirect_uri": "https://chatgpt.com/connector/oauth/callback-id",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "scope": "mcp offline_access",
+                "ho_profile": profile,
+                "ho_session": session_id,
+                "phone_number": "+15551234567",
+            }
+        )
+    )
+
+    response = TestClient(main.app).post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": "legacy-shared-client",
+            "code": code,
+            "code_verifier": verifier,
+            "redirect_uri": "https://chatgpt.com/connector/oauth/callback-id",
+        },
+    )
+
+    assert response.status_code == 200
+    access_claims = jwt.decode(
+        response.json()["access_token"],
+        options={"verify_signature": False},
+    )
+    refresh_claims = jwt.decode(
+        response.json()["refresh_token"],
+        options={"verify_signature": False},
+    )
+    forbidden = {
+        "ho_profile",
+        "ho_phone",
+        "phone_number",
+        "ho_name",
+        "ho_address",
+        "enc_ho_token",
+    }
+    assert not forbidden & access_claims.keys()
+    assert not forbidden & refresh_claims.keys()
+    assert access_claims["ho_session"] == session_id
+    assert refresh_claims["ho_session"] == session_id
+    assert jwt.get_unverified_header(response.json()["refresh_token"])["alg"] == "ES256"
+
+
+def test_legacy_hs256_refresh_token_rotates_to_es256(monkeypatch):
+    _configure_oauth(monkeypatch)
+    now = main.time.time()
+    legacy_refresh = jwt.encode(
+        {
+            "type": "refresh_token",
+            "jti": "legacy-refresh-jti",
+            "iat": now,
+            "exp": now + 600,
+            "client_id": "legacy-shared-client",
+            "scope": "mcp offline_access",
+            "resource": "https://mcp.example.com/mcp",
+            "phone_number": "+15551234567",
+            "ho_profile": {"ho_name": "Alex Fontova"},
+        },
+        main.OAUTH_CLIENT_SECRET,
+        algorithm="HS256",
+    )
+    asyncio.run(
+        main._get_state_store().put(
+            "refresh:legacy-refresh-jti",
+            {"status": "active"},
+            int(now + 600),
+        )
+    )
+
+    response = TestClient(main.app).post(
+        "/oauth/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": "legacy-shared-client",
+            "refresh_token": legacy_refresh,
+        },
+    )
+
+    assert response.status_code == 200
+    assert jwt.get_unverified_header(response.json()["refresh_token"])["alg"] == "ES256"
+    assert "ho_profile" not in jwt.decode(
+        response.json()["access_token"],
+        options={"verify_signature": False},
+    )
+
+
+def test_bad_otp_returns_json_400_for_non_browser_client(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    async def reject_otp(client, method, url, **kwargs):
+        return httpx.Response(
+            400,
+            json={
+                "error": "invalid_grant",
+                "error_code": "invalid_or_expired_otp",
+                "error_description": "The verification code is incorrect or expired.",
+            },
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(main, "operator_request", reject_otp)
+    response = TestClient(main.app).post(
+        "/oauth/authorize",
+        data={
+            "response_type": "code",
+            "client_id": "legacy-shared-client",
+            "redirect_uri": "https://chatgpt.com/connector/oauth/callback-id",
+            "code_challenge": "challenge",
+            "code_challenge_method": "S256",
+            "scope": "mcp",
+            "phone_number": "+15551234567",
+            "verification_code": "000000",
+            "step": "verify",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_grant"
+    assert response.json()["error_code"] == "invalid_or_expired_otp"
+
+
+def test_authorize_rejects_post_without_step_or_inferable_fields(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/oauth/authorize",
+        data={
+            "response_type": "code",
+            "client_id": "legacy-shared-client",
+            "redirect_uri": "https://chatgpt.com/connector/oauth/callback-id",
+            "code_challenge": "challenge",
+            "code_challenge_method": "S256",
+            "scope": "mcp",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "missing_form_step"

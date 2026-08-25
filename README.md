@@ -79,6 +79,7 @@ Core operator-owned endpoints:
 | `PROFILE_LOOKUP_API` | Optional phone/profile lookup endpoint |
 | `AUTH_WEBHOOK_URL` | Optional OTP send/verify endpoint |
 | `HOMEOWNER_PROFILE_API` | Optional profile-by-token endpoint |
+| `CANCEL_BOOKING_API` | Optional authenticated, ownership-enforcing cancellation endpoint |
 
 Optional integrations include notification endpoints, operator persistence,
 monitoring webhooks, OAuth, and the OpenAI app verification challenge. All
@@ -86,7 +87,8 @@ URLs and secrets must be supplied by the operator.
 
 ### OAuth interoperability
 
-When OAuth is enabled, access tokens use ES256 and the public verification key
+When OAuth is enabled, access and refresh tokens use separate ES256 signing
+keys; the access-token public verification key
 is exposed through the metadata `jwks_uri`. Set
 `OAUTH_ALLOWED_REDIRECT_URIS` to the exact hosted or claimed-scheme callbacks
 your clients use. Native clients may register HTTP loopback callbacks on
@@ -100,8 +102,11 @@ unique persisted client ids from `/oauth/register`; the legacy configured
 client id and unregistered PKCE clients remain supported.
 
 Use at least 32 cryptographically random bytes for `OAUTH_CLIENT_SECRET`. The
-server derives a domain-separated ES256 key from that secret so stateless
-instances publish and verify the same access-token key.
+server derives domain-separated ES256 keys from that secret so stateless
+instances publish and verify the same access-token key without reusing it for
+refresh-token signatures. OAuth tokens carry an opaque homeowner session id;
+profile PII and upstream bearer credentials remain in the server-side state
+store.
 
 ### Upstream MCP relay
 

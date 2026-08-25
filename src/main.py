@@ -65,7 +65,13 @@ from src.monitor import (
     request_meta_from_request,
     set_request_meta,
 )
-from src.oauth_signing import access_token_jwk, decode_access_token, encode_access_token
+from src.oauth_signing import (
+    access_token_jwk,
+    decode_access_token,
+    decode_refresh_token as decode_asymmetric_refresh_token,
+    encode_access_token,
+    encode_refresh_token as encode_asymmetric_refresh_token,
+)
 from src.security import (
     build_allowed_hosts,
     check_http_rate_limit,
@@ -170,6 +176,52 @@ def _ai_service_for_oauth_redirect(redirect_uri: str | None) -> str | None:
     if parsed.scheme != "https":
         return None
     return _known_ai_service(identify_ai_service(redirect_uri=normalized))
+
+
+class OAuthOtpError(Exception):
+    def __init__(self, *, error_code: str, description: str) -> None:
+        super().__init__(description)
+        self.error_code = error_code
+        self.description = description
+
+
+def _otp_error_from_response(response: httpx.Response) -> OAuthOtpError | None:
+    """Translate structured and legacy auth-webhook OTP failures."""
+
+    if response.status_code < 400:
+        return None
+    payload: dict[str, Any] = {}
+    try:
+        raw = response.json()
+        if isinstance(raw, dict):
+            payload = raw
+    except ValueError:
+        pass
+    code = str(payload.get("error_code") or "").strip()
+    description = str(payload.get("error_description") or "").strip()
+    if code in {"invalid_otp", "expired_otp", "invalid_or_expired_otp"}:
+        return OAuthOtpError(
+            error_code=code,
+            description=description
+            or "The verification code is incorrect or expired. Request a new code.",
+        )
+    legacy_text = (description or response.text or "").strip().lower()
+    if "expired" in legacy_text and "invalid" in legacy_text:
+        return OAuthOtpError(
+            error_code="invalid_or_expired_otp",
+            description="The verification code is incorrect or expired. Request a new code.",
+        )
+    if "expired" in legacy_text:
+        return OAuthOtpError(
+            error_code="expired_otp",
+            description="The verification code has expired. Request a new code.",
+        )
+    if "invalid" in legacy_text or "incorrect" in legacy_text:
+        return OAuthOtpError(
+            error_code="invalid_otp",
+            description="The verification code is incorrect.",
+        )
+    return None
 
 
 def _is_static_mvp_token(token: str) -> bool:
@@ -292,7 +344,7 @@ def _decrypt_token(encrypted: str) -> str:
 
 
 def _encode_refresh_token(payload: dict[str, Any]) -> str:
-    """Encode refresh token data as a signed JWT."""
+    """Encode refresh-token state with an asymmetric, purpose-specific key."""
     now = time.time()
     payload = {
         **payload,
@@ -301,22 +353,28 @@ def _encode_refresh_token(payload: dict[str, Any]) -> str:
         "exp": now + REFRESH_TOKEN_TTL,
         "jti": secrets.token_urlsafe(16),
     }
-    return jwt.encode(payload, OAUTH_CLIENT_SECRET, algorithm="HS256")
+    return encode_asymmetric_refresh_token(payload, OAUTH_CLIENT_SECRET)
 
 
 def _decode_refresh_token(token: str) -> dict[str, Any] | None:
     """Decode and validate a refresh token JWT. Returns None if invalid/expired."""
     try:
-        payload = jwt.decode(
-            token,
-            OAUTH_CLIENT_SECRET,
-            algorithms=["HS256"],
-            options={"require": ["exp", "jti", "type"]},
-        )
+        payload = decode_asymmetric_refresh_token(token, OAUTH_CLIENT_SECRET)
+    except jwt.InvalidTokenError:
+        try:
+            payload = jwt.decode(
+                token,
+                OAUTH_CLIENT_SECRET,
+                algorithms=["HS256"],
+                options={"require": ["exp", "jti", "type"]},
+            )
+        except jwt.InvalidTokenError:
+            return None
+    try:
         if payload.get("type") != "refresh_token":
             return None
         return payload
-    except jwt.InvalidTokenError:
+    except (AttributeError, TypeError):
         return None
 
 
@@ -386,6 +444,35 @@ async def _resolve_ho_session(session_id: str) -> dict[str, Any] | None:
         except (InvalidToken, ValueError, TypeError):
             logger.warning("Unable to decrypt homeowner session token")
     return profile
+
+
+async def _backfill_ho_session_profile(
+    session_id: str,
+    update: dict[str, Any],
+) -> None:
+    """Fill empty durable-session identity fields after a successful booking."""
+
+    if not session_id:
+        return
+    store = _get_state_store()
+    profile = await store.get(f"session:{session_id}")
+    if not profile:
+        return
+    name = str(update.get("ho_name") or "").strip()
+    address = update.get("ho_address")
+    if name and not str(profile.get("name") or profile.get("ho_name") or "").strip():
+        profile["name"] = name
+        profile["ho_name"] = name
+    if isinstance(address, dict) and address and not (
+        profile.get("address") or profile.get("ho_address")
+    ):
+        profile["address"] = dict(address)
+        profile["ho_address"] = dict(address)
+    await store.put(
+        f"session:{session_id}",
+        profile,
+        int(time.time()) + REFRESH_TOKEN_TTL,
+    )
 
 
 async def _issue_refresh_token(payload: dict[str, Any]) -> str:
@@ -845,7 +932,7 @@ async def authorize_endpoint(request: Request):
         }
         phone_number = (form.get("phone_number") or "").strip()
         verification_code = (form.get("verification_code") or "").strip()
-        step = form.get("step") or "phone"
+        step = (form.get("step") or "").strip()
         error = ""
 
     response_type = params.get("response_type")
@@ -908,9 +995,28 @@ async def authorize_endpoint(request: Request):
             status_code=400,
         )
 
+    if request.method == "POST" and not step:
+        if verification_code:
+            step = "verify"
+        elif phone_number:
+            step = "send_code"
+        else:
+            return JSONResponse(
+                {
+                    "error": "invalid_request",
+                    "error_code": "missing_form_step",
+                    "error_description": (
+                        "Submit step=send_code with phone_number or step=verify with "
+                        "phone_number and verification_code."
+                    ),
+                },
+                status_code=400,
+            )
+
     # Step 2: handle POST actions
     ho_profile: dict | None = None
     upstream_access_token = ""
+    response_status = 200
     if request.method == "POST":
         if step == "send_code":
             if not phone_number:
@@ -962,6 +1068,9 @@ async def authorize_endpoint(request: Request):
                         },
                         timeout=8,
                     )
+                    otp_error = _otp_error_from_response(r)
+                    if otp_error:
+                        raise otp_error
                     r.raise_for_status()
                     auth_payload = r.json() or {}
                     access_token = auth_payload.get("access_token")
@@ -980,13 +1089,33 @@ async def authorize_endpoint(request: Request):
                         mask_phone(normalized_phone),
                         bool(ho_profile),
                     )
+                except OAuthOtpError as exc:
+                    logger.info(
+                        "OTP verification rejected for %s (%s)",
+                        mask_phone(phone_number),
+                        exc.error_code,
+                    )
+                    if "text/html" not in request.headers.get("accept", "").lower():
+                        return JSONResponse(
+                            {
+                                "error": "invalid_grant",
+                                "error_code": exc.error_code,
+                                "error_description": exc.description,
+                            },
+                            status_code=400,
+                        )
+                    error = exc.description
+                    response_status = 400
+                    step = "code"
                 except httpx.TimeoutException as exc:
                     logger.error("Timeout during OTP verify for %s: %s", mask_phone(phone_number), exc)
                     error = "Verification timed out. Please try again."
+                    response_status = 504
                     step = "code"
                 except Exception as exc:
                     logger.error("OTP verification failed for %s: %s", mask_phone(phone_number), exc)
                     error = "Verification failed. Please check the code and try again."
+                    response_status = 502
                     step = "code"
 
             if ho_profile is not None and not error:
@@ -1249,7 +1378,7 @@ async def authorize_endpoint(request: Request):
   </script>
 </body>
 </html>"""
-    return Response(content=html, media_type="text/html")
+    return Response(content=html, media_type="text/html", status_code=response_status)
 
 
 # -----------  OAuth token  -----------
@@ -1341,25 +1470,17 @@ async def token_endpoint(request: Request):
 
         ho_profile = _trim_profile(stored.get("ho_profile") or {})
         ho_session = str(stored.get("ho_session") or "")
-        if ho_profile:
-            claims["ho_profile"] = ho_profile
+        if not ho_session and ho_profile:
+            ho_session = await _store_ho_session(ho_profile, "")
         if ho_session:
             claims["ho_session"] = ho_session
-        if stored.get("phone_number"):
-            claims["ho_phone"] = stored["phone_number"]
-        if ho_profile.get("ho_name"):
-            claims["ho_name"] = ho_profile.get("ho_name")
-        if ho_profile.get("ho_address"):
-            claims["ho_address"] = ho_profile.get("ho_address")
 
         access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
 
         refresh_token = await _issue_refresh_token({
             "client_id": client_id,
             "scope": scope,
-            "ho_profile": ho_profile,
             "ho_session": ho_session,
-            "phone_number": stored.get("phone_number"),
             "resource": resource,
             "ai_service": ai_service,
         })
@@ -1421,6 +1542,10 @@ async def token_endpoint(request: Request):
         scope = stored_rt.get("scope") or "mcp"
         ho_profile = _trim_profile(stored_rt.get("ho_profile") or {})
         ho_session = str(stored_rt.get("ho_session") or "")
+        if not ho_session and ho_profile:
+            # One-time migration for legacy refresh tokens that carried
+            # profile data instead of an opaque durable session id.
+            ho_session = await _store_ho_session(ho_profile, "")
 
         claims: dict[str, Any] = {
             "sub": client_id,
@@ -1432,25 +1557,15 @@ async def token_endpoint(request: Request):
         ai_service = _known_ai_service(stored_rt.get("ai_service"))
         if ai_service:
             claims["ai_service"] = ai_service
-        if ho_profile:
-            claims["ho_profile"] = ho_profile
         if ho_session:
             claims["ho_session"] = ho_session
-        if stored_rt.get("phone_number"):
-            claims["ho_phone"] = stored_rt["phone_number"]
-        if ho_profile.get("ho_name"):
-            claims["ho_name"] = ho_profile.get("ho_name")
-        if ho_profile.get("ho_address"):
-            claims["ho_address"] = ho_profile.get("ho_address")
 
         access_token = encode_access_token(claims, OAUTH_CLIENT_SECRET)
 
         new_refresh_token = await _issue_refresh_token({
             "client_id": client_id,
             "scope": scope,
-            "ho_profile": ho_profile,
             "ho_session": ho_session,
-            "phone_number": stored_rt.get("phone_number"),
             "resource": resource,
             "ai_service": ai_service,
         })
