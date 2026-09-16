@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Hire-Nimbus/home-services-mcp",
+  "name": "io.github.HireNimbus/home-services-mcp",
   "title": "HireNimbus home services MCP",
   "description": "Find and book verified local home service professionals through AI agents.",
   "version": "1.0.1",
