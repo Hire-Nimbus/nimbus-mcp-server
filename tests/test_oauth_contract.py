@@ -553,3 +553,178 @@ def test_authorize_rejects_post_without_step_or_inferable_fields(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["error_code"] == "missing_form_step"
+
+
+def _assert_unauthorized_mcp_discovery(response, *, expect_html: bool = False) -> None:
+    assert response.status_code == 401
+    authenticate = response.headers["www-authenticate"]
+    assert 'Bearer realm="nimbus-mcp"' in authenticate
+    assert (
+        'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"'
+        in authenticate
+    )
+    if expect_html:
+        assert "text/html" in response.headers["content-type"]
+        assert "https://mcp.example.com/oauth/authorize" in response.text
+        assert "https://mcp.example.com/.well-known/oauth-protected-resource" in response.text
+        assert "https://mcp.example.com/mcp" in response.text
+        return
+
+    payload = response.json()
+    assert payload["error"] == "unauthorized"
+    assert payload["server"]["transport"] == "streamable-http"
+    assert payload["server"]["endpoint"] == "https://mcp.example.com/mcp"
+    assert "https://mcp.example.com/oauth/authorize" in payload["message"]
+    assert (
+        "https://mcp.example.com/.well-known/oauth-protected-resource"
+        in payload["message"]
+    )
+    authentication = payload["authentication"]
+    assert authentication["required"] is True
+    assert authentication["type"] == "oauth2"
+    assert authentication["scheme"] == "Bearer"
+    assert authentication["resource_metadata"] == (
+        "https://mcp.example.com/.well-known/oauth-protected-resource"
+    )
+    assert authentication["authorization_server_metadata"] == (
+        "https://mcp.example.com/.well-known/oauth-authorization-server"
+    )
+    assert authentication["authorization_endpoint"] == "https://mcp.example.com/oauth/authorize"
+    assert authentication["token_endpoint"] == "https://mcp.example.com/oauth/token"
+    urls = {item["url"] for item in payload["unauthenticated_access"]["usable"]}
+    assert "https://mcp.example.com/" in urls
+    assert "https://mcp.example.com/.well-known/mcp.json" in urls
+    assert "https://mcp.example.com/.well-known/mcp/server-card.json" in urls
+    assert "https://mcp.example.com/oauth/authorize" in urls
+    assert "https://mcp.example.com/mcp" in payload["unauthenticated_access"]["requires_bearer"]
+
+
+def test_unauthenticated_mcp_static_token_omits_oauth_discovery(monkeypatch):
+    monkeypatch.setattr(main, "OAUTH_CLIENT_ID", "")
+    monkeypatch.setattr(main, "OAUTH_CLIENT_SECRET", "")
+    monkeypatch.setattr(main, "MVP_STATIC_MCP_TOKEN", "test-static-token")
+    monkeypatch.setattr(main, "PUBLIC_BASE_URL", "https://mcp.example.com")
+
+    response = TestClient(main.app).get("/mcp")
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"] == "unauthorized"
+    assert payload["authentication"]["type"] == "bearer"
+    assert "authorization_endpoint" not in payload["authentication"]
+    assert "resource_metadata" not in payload["authentication"]
+    urls = {item["url"] for item in payload["unauthenticated_access"]["usable"]}
+    assert "https://mcp.example.com/" in urls
+    assert "https://mcp.example.com/.well-known/mcp/server-card.json" in urls
+    assert "https://mcp.example.com/oauth/authorize" not in urls
+    assert "https://mcp.example.com/.well-known/oauth-protected-resource" not in urls
+    assert "https://mcp.example.com/.well-known/oauth-authorization-server" not in urls
+    assert "https://mcp.example.com/.well-known/openid-configuration" not in urls
+    assert "https://mcp.example.com/.well-known/jwks.json" not in urls
+    assert "oauth/authorize" not in payload["message"]
+
+
+def test_unauthenticated_mcp_get_returns_discovery_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    client = TestClient(main.app)
+    response = client.get("/mcp")
+    landing = client.get("/")
+    metadata = client.get("/.well-known/oauth-protected-resource")
+
+    _assert_unauthorized_mcp_discovery(response)
+    assert landing.status_code == 200
+    assert metadata.status_code == 200
+    assert metadata.json()["resource"] == "https://mcp.example.com/mcp"
+
+
+def test_unauthenticated_mcp_post_returns_discovery_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).post(
+        "/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        },
+    )
+
+    _assert_unauthorized_mcp_discovery(response)
+    assert response.headers["content-type"].startswith("application/json")
+
+
+def test_unauthenticated_mcp_browser_accept_returns_html_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Accept": "text/html,application/xhtml+xml"},
+    )
+
+    _assert_unauthorized_mcp_discovery(response, expect_html=True)
+
+
+def test_unauthenticated_mcp_zero_json_q_with_html_returns_html_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Accept": "application/json;q=0, text/html"},
+    )
+
+    _assert_unauthorized_mcp_discovery(response, expect_html=True)
+
+
+def test_unauthenticated_mcp_zero_html_q_returns_json_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Accept": "text/html;q=0"},
+    )
+
+    _assert_unauthorized_mcp_discovery(response)
+    assert response.headers["content-type"].startswith("application/json")
+
+
+def test_invalid_bearer_on_mcp_stays_invalid_token(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Authorization": "Bearer not-a-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_token"
+
+
+def test_authenticated_mcp_tools_list_still_works(monkeypatch):
+    _configure_oauth(monkeypatch)
+    monkeypatch.setattr(main, "MVP_STATIC_MCP_TOKEN", "test-static-token")
+
+    with TestClient(main.app) as client:
+        listed = client.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "Mcp-Protocol-Version": "2025-03-26",
+                "Authorization": "Bearer test-static-token",
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        )
+
+    assert listed.status_code == 200
+    names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+    assert "search_providers" in names
