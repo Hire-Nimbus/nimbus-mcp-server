@@ -811,7 +811,6 @@ def _resource_metadata_url(base: str) -> str:
 
 
 def _accepts_html_help(accept: str) -> bool:
-    """True for browser Accept values. MCP clients send JSON and event-stream."""
     lowered = accept.lower()
     if "application/json" in lowered or "text/event-stream" in lowered:
         return False
@@ -819,7 +818,6 @@ def _accepts_html_help(accept: str) -> bool:
 
 
 def _unauthorized_discovery_payload(base: str) -> dict[str, Any]:
-    """401 body for a missing Bearer token. Reuses live well-known URLs."""
     resource_metadata = _resource_metadata_url(base)
     authorization_server = f"{base}/.well-known/oauth-authorization-server"
     oauth = _oauth_enabled()
