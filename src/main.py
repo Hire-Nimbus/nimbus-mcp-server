@@ -825,26 +825,35 @@ def _unauthorized_discovery_payload(base: str) -> dict[str, Any]:
         {"url": f"{base}/", "purpose": "Human landing page"},
         {"url": f"{base}/.well-known/mcp.json", "purpose": "MCP server manifest"},
         {"url": f"{base}/.well-known/mcp/server-card.json", "purpose": "MCP server card"},
-        {"url": resource_metadata, "purpose": "OAuth protected-resource metadata"},
-        {"url": authorization_server, "purpose": "OAuth authorization-server metadata"},
-        {"url": f"{base}/.well-known/openid-configuration", "purpose": "OIDC-compatible discovery"},
-        {"url": f"{base}/.well-known/jwks.json", "purpose": "Access-token JWKS"},
     ]
     authentication: dict[str, Any] = {
         "required": True,
         "scheme": "Bearer",
-        "resource_metadata": resource_metadata,
-        "authorization_server_metadata": authorization_server,
     }
     if oauth:
         authentication["type"] = "oauth2"
+        authentication["resource_metadata"] = resource_metadata
+        authentication["authorization_server_metadata"] = authorization_server
         authentication["authorization_endpoint"] = f"{base}/oauth/authorize"
         authentication["token_endpoint"] = f"{base}/oauth/token"
-        usable.append(
-            {"url": f"{base}/oauth/authorize", "purpose": "Start OAuth authorization-code + PKCE"}
-        )
-        usable.append(
-            {"url": f"{base}/oauth/token", "purpose": "Exchange an authorization code or refresh token"}
+        usable.extend(
+            [
+                {"url": resource_metadata, "purpose": "OAuth protected-resource metadata"},
+                {"url": authorization_server, "purpose": "OAuth authorization-server metadata"},
+                {
+                    "url": f"{base}/.well-known/openid-configuration",
+                    "purpose": "OIDC-compatible discovery",
+                },
+                {"url": f"{base}/.well-known/jwks.json", "purpose": "Access-token JWKS"},
+                {
+                    "url": f"{base}/oauth/authorize",
+                    "purpose": "Start OAuth authorization-code + PKCE",
+                },
+                {
+                    "url": f"{base}/oauth/token",
+                    "purpose": "Exchange an authorization code or refresh token",
+                },
+            ]
         )
         if OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED:
             authentication["registration_endpoint"] = f"{base}/oauth/register"
@@ -900,10 +909,15 @@ def _unauthorized_discovery_html(payload: dict[str, Any]) -> str:
     requires_items = [
         f"<li>{html_mod.escape(str(item))}</li>" for item in access["requires_bearer"]
     ]
-    resource_metadata = html_mod.escape(str(authentication["resource_metadata"]))
+    resource_metadata = html_mod.escape(str(authentication.get("resource_metadata") or ""))
     authorize = html_mod.escape(str(authentication.get("authorization_endpoint") or ""))
     authorize_block = (
         f'<p>Start OAuth at <a href="{authorize}">{authorize}</a>.</p>' if authorize else ""
+    )
+    resource_block = (
+        f'<p>OAuth resource metadata: <a href="{resource_metadata}">{resource_metadata}</a></p>'
+        if resource_metadata
+        else ""
     )
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -937,7 +951,7 @@ def _unauthorized_discovery_html(payload: dict[str, Any]) -> str:
     <p>{message}</p>
     <p>Protected MCP transport: <code>{endpoint}</code></p>
     {authorize_block}
-    <p>OAuth resource metadata: <a href="{resource_metadata}">{resource_metadata}</a></p>
+    {resource_block}
     <h2>Usable without a Bearer token</h2>
     <ul>
       {''.join(usable_items)}

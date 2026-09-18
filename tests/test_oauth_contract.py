@@ -599,6 +599,31 @@ def _assert_unauthorized_mcp_discovery(response, *, expect_html: bool = False) -
     assert "https://mcp.example.com/mcp" in payload["unauthenticated_access"]["requires_bearer"]
 
 
+def test_unauthenticated_mcp_static_token_omits_oauth_discovery(monkeypatch):
+    monkeypatch.setattr(main, "OAUTH_CLIENT_ID", "")
+    monkeypatch.setattr(main, "OAUTH_CLIENT_SECRET", "")
+    monkeypatch.setattr(main, "MVP_STATIC_MCP_TOKEN", "test-static-token")
+    monkeypatch.setattr(main, "PUBLIC_BASE_URL", "https://mcp.example.com")
+
+    response = TestClient(main.app).get("/mcp")
+
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"] == "unauthorized"
+    assert payload["authentication"]["type"] == "bearer"
+    assert "authorization_endpoint" not in payload["authentication"]
+    assert "resource_metadata" not in payload["authentication"]
+    urls = {item["url"] for item in payload["unauthenticated_access"]["usable"]}
+    assert "https://mcp.example.com/" in urls
+    assert "https://mcp.example.com/.well-known/mcp/server-card.json" in urls
+    assert "https://mcp.example.com/oauth/authorize" not in urls
+    assert "https://mcp.example.com/.well-known/oauth-protected-resource" not in urls
+    assert "https://mcp.example.com/.well-known/oauth-authorization-server" not in urls
+    assert "https://mcp.example.com/.well-known/openid-configuration" not in urls
+    assert "https://mcp.example.com/.well-known/jwks.json" not in urls
+    assert "oauth/authorize" not in payload["message"]
+
+
 def test_unauthenticated_mcp_get_returns_discovery_401(monkeypatch):
     _configure_oauth(monkeypatch)
 
