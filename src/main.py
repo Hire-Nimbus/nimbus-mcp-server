@@ -806,6 +806,172 @@ _PUBLIC_PATHS = {
 _PUBLIC_GET_ONLY_PATHS = {"/"}  # GET / = landing page; POST / = MCP (needs auth)
 
 
+def _resource_metadata_url(base: str) -> str:
+    return f"{base}/.well-known/oauth-protected-resource"
+
+
+def _accepts_html_help(accept: str) -> bool:
+    """True for browser Accept values. MCP clients send JSON and event-stream."""
+    lowered = accept.lower()
+    if "application/json" in lowered or "text/event-stream" in lowered:
+        return False
+    return "text/html" in lowered
+
+
+def _unauthorized_discovery_payload(base: str) -> dict[str, Any]:
+    """401 body for a missing Bearer token. Reuses live well-known URLs."""
+    resource_metadata = _resource_metadata_url(base)
+    authorization_server = f"{base}/.well-known/oauth-authorization-server"
+    oauth = _oauth_enabled()
+    usable: list[dict[str, str]] = [
+        {"url": f"{base}/", "purpose": "Human landing page"},
+        {"url": f"{base}/.well-known/mcp.json", "purpose": "MCP server manifest"},
+        {"url": f"{base}/.well-known/mcp/server-card.json", "purpose": "MCP server card"},
+        {"url": resource_metadata, "purpose": "OAuth protected-resource metadata"},
+        {"url": authorization_server, "purpose": "OAuth authorization-server metadata"},
+        {"url": f"{base}/.well-known/openid-configuration", "purpose": "OIDC-compatible discovery"},
+        {"url": f"{base}/.well-known/jwks.json", "purpose": "Access-token JWKS"},
+    ]
+    authentication: dict[str, Any] = {
+        "required": True,
+        "scheme": "Bearer",
+        "resource_metadata": resource_metadata,
+        "authorization_server_metadata": authorization_server,
+    }
+    if oauth:
+        authentication["type"] = "oauth2"
+        authentication["authorization_endpoint"] = f"{base}/oauth/authorize"
+        authentication["token_endpoint"] = f"{base}/oauth/token"
+        usable.append(
+            {"url": f"{base}/oauth/authorize", "purpose": "Start OAuth authorization-code + PKCE"}
+        )
+        usable.append(
+            {"url": f"{base}/oauth/token", "purpose": "Exchange an authorization code or refresh token"}
+        )
+        if OAUTH_DYNAMIC_CLIENT_REGISTRATION_ENABLED:
+            authentication["registration_endpoint"] = f"{base}/oauth/register"
+            usable.append(
+                {"url": f"{base}/oauth/register", "purpose": "RFC 7591 dynamic client registration"}
+            )
+        message = (
+            f"{MCP_SERVER_NAME} is a remote MCP server. "
+            "MCP sessions and protected tools require a Bearer access token. "
+            f"Start OAuth at {base}/oauth/authorize or read {resource_metadata}."
+        )
+    else:
+        authentication["type"] = "bearer"
+        message = (
+            f"{MCP_SERVER_NAME} is a remote MCP server. "
+            "MCP sessions and protected tools require a Bearer access token. "
+            f"Public discovery remains at {base}/ and {base}/.well-known/mcp/server-card.json."
+        )
+    return {
+        "error": "unauthorized",
+        "message": message,
+        "server": {
+            "name": MCP_SERVER_NAME,
+            "description": MCP_SERVER_DESCRIPTION,
+            "transport": "streamable-http",
+            "endpoint": f"{base}/mcp",
+        },
+        "authentication": authentication,
+        "unauthenticated_access": {
+            "usable": usable,
+            "requires_bearer": [
+                f"{base}/mcp",
+                "MCP initialize, tools/list, and tools/call",
+                f"{base}/tools/*",
+            ],
+        },
+    }
+
+
+def _unauthorized_discovery_html(payload: dict[str, Any]) -> str:
+    server = payload["server"]
+    authentication = payload["authentication"]
+    access = payload["unauthenticated_access"]
+    title = html_mod.escape(str(server["name"]))
+    description = html_mod.escape(str(server["description"]))
+    message = html_mod.escape(str(payload["message"]))
+    endpoint = html_mod.escape(str(server["endpoint"]))
+    usable_items = []
+    for item in access["usable"]:
+        url = html_mod.escape(item["url"], quote=True)
+        purpose = html_mod.escape(item["purpose"])
+        usable_items.append(f"<li><a href=\"{url}\">{url}</a>. {purpose}</li>")
+    requires_items = [
+        f"<li>{html_mod.escape(str(item))}</li>" for item in access["requires_bearer"]
+    ]
+    resource_metadata = html_mod.escape(str(authentication["resource_metadata"]))
+    authorize = html_mod.escape(str(authentication.get("authorization_endpoint") or ""))
+    authorize_block = (
+        f'<p>Start OAuth at <a href="{authorize}">{authorize}</a>.</p>' if authorize else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title} needs a Bearer token</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0a0a; color: #e5e5e5;
+      display: flex; justify-content: center; padding: 48px 16px;
+    }}
+    .card {{
+      max-width: 640px; padding: 32px 24px;
+      background: #171717; border: 1px solid #262626; border-radius: 16px;
+    }}
+    h1 {{ font-size: 22px; color: #fff; margin-bottom: 8px; }}
+    p {{ font-size: 14px; color: #a3a3a3; line-height: 1.5; margin-bottom: 12px; }}
+    a {{ color: #22c55e; }}
+    h2 {{ font-size: 15px; color: #d4d4d4; margin: 16px 0 8px; }}
+    ul {{ padding-left: 18px; font-size: 13px; color: #a3a3a3; line-height: 1.6; }}
+    code {{ color: #e5e5e5; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>{title}</h1>
+    <p>{description}</p>
+    <p>{message}</p>
+    <p>Protected MCP transport: <code>{endpoint}</code></p>
+    {authorize_block}
+    <p>OAuth resource metadata: <a href="{resource_metadata}">{resource_metadata}</a></p>
+    <h2>Usable without a Bearer token</h2>
+    <ul>
+      {''.join(usable_items)}
+    </ul>
+    <h2>Requires a Bearer token</h2>
+    <ul>
+      {''.join(requires_items)}
+    </ul>
+  </div>
+</body>
+</html>"""
+
+
+def _missing_bearer_response(request: Request) -> Response:
+    base = _get_base_url(request)
+    payload = _unauthorized_discovery_payload(base)
+    headers = {
+        "WWW-Authenticate": (
+            f'Bearer realm="nimbus-mcp", '
+            f'resource_metadata="{_resource_metadata_url(base)}"'
+        )
+    }
+    if _accepts_html_help(request.headers.get("accept", "")):
+        return Response(
+            content=_unauthorized_discovery_html(payload),
+            status_code=401,
+            media_type="text/html",
+            headers=headers,
+        )
+    return JSONResponse(payload, status_code=401, headers=headers)
+
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next) -> Response:
     path = request.url.path
@@ -844,16 +1010,7 @@ async def security_middleware(request: Request, call_next) -> Response:
         base = _get_base_url(request)
         if not auth_header.startswith("Bearer "):
             logger.warning("Missing Bearer token for %s %s", method, path)
-            return JSONResponse(
-                {"error": "unauthorized", "message": "Bearer token required"},
-                status_code=401,
-                headers={
-                    "WWW-Authenticate": (
-                        f'Bearer realm="nimbus-mcp", '
-                        f'resource_metadata="{base}/.well-known/oauth-protected-resource"'
-                    )
-                },
-            )
+            return _missing_bearer_response(request)
         token = auth_header[7:]
         if _is_static_mvp_token(token):
             # MVP bypass path: trust this integration token and provide a
