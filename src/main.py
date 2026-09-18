@@ -810,11 +810,32 @@ def _resource_metadata_url(base: str) -> str:
     return f"{base}/.well-known/oauth-protected-resource"
 
 
+def _accept_quality(accept: str, media_type: str) -> float:
+    wanted = media_type.lower()
+    for item in accept.split(","):
+        parts = item.split(";")
+        if parts[0].strip().lower() != wanted:
+            continue
+        for param in parts[1:]:
+            name, sep, value = param.partition("=")
+            if not sep or name.strip().lower() != "q":
+                continue
+            try:
+                quality = float(value.strip())
+            except ValueError:
+                return 0.0
+            if quality < 0.0 or quality > 1.0:
+                return 0.0
+            return quality
+        return 1.0
+    return 0.0
+
+
 def _accepts_html_help(accept: str) -> bool:
-    lowered = accept.lower()
-    if "application/json" in lowered or "text/event-stream" in lowered:
-        return False
-    return "text/html" in lowered
+    json_quality = _accept_quality(accept, "application/json")
+    event_stream_quality = _accept_quality(accept, "text/event-stream")
+    html_quality = _accept_quality(accept, "text/html")
+    return json_quality == 0.0 and event_stream_quality == 0.0 and html_quality > 0.0
 
 
 def _unauthorized_discovery_payload(base: str) -> dict[str, Any]:

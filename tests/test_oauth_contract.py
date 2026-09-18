@@ -674,6 +674,29 @@ def test_unauthenticated_mcp_browser_accept_returns_html_401(monkeypatch):
     _assert_unauthorized_mcp_discovery(response, expect_html=True)
 
 
+def test_unauthenticated_mcp_zero_json_q_with_html_returns_html_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Accept": "application/json;q=0, text/html"},
+    )
+
+    _assert_unauthorized_mcp_discovery(response, expect_html=True)
+
+
+def test_unauthenticated_mcp_zero_html_q_returns_json_401(monkeypatch):
+    _configure_oauth(monkeypatch)
+
+    response = TestClient(main.app).get(
+        "/mcp",
+        headers={"Accept": "text/html;q=0"},
+    )
+
+    _assert_unauthorized_mcp_discovery(response)
+    assert response.headers["content-type"].startswith("application/json")
+
+
 def test_invalid_bearer_on_mcp_stays_invalid_token(monkeypatch):
     _configure_oauth(monkeypatch)
 
