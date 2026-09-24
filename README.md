@@ -170,6 +170,24 @@ The portable home-service workflow is available at
 [`skills/home-service-concierge/SKILL.md`](skills/home-service-concierge/SKILL.md).
 Its app handoff uses the operator-configured `APP_LINK` value.
 
+## Tools
+
+- `get_my_profile` — Load saved homeowner profile/address when already signed in
+- `search_providers` — Search verified pros outside dedicated find_* categories
+- `get_provider_details` — Full provider profile by slug
+- `get_provider_reviews` — Reviews for a provider
+- `create_booking` — Preview/submit booking after a pro is chosen
+- `get_previous_jobs` — Past/active jobs (auth)
+- `get_booking_status` — Booking status by id (auth)
+- `book_same_pro_again` — Rebook a previous pro (auth)
+- `cancel_booking` — Cancel a booking (auth)
+- `find_handyman` / `book_handyman`
+- `find_hvac` / `book_hvac`
+- `find_plumber` / `book_plumber`
+- `find_electrician` / `book_electrician`
+- `find_renovation` / `book_renovation`
+- `get_more_tools` — Discover additional specialized tools
+
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE). Product names, trademarks,
