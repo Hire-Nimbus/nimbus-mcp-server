@@ -808,7 +808,7 @@ _PUBLIC_GET_ONLY_PATHS = {"/"}  # GET / = landing page; POST / = MCP (needs auth
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next) -> Response:
-    path = request.url.path
+    path = request.scope["path"]  # not request.url.path: Host header can spoof it (CVE-2026-48710)
     method = request.method
 
     logger.info(">> %s %s (host=%s)", method, path, request.headers.get("host", "?"))
